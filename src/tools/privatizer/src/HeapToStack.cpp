@@ -23,6 +23,8 @@
 
 namespace llvm::noelle {
 
+enum FreeType { ONLY_FREE_ALLOCABLE, ONLY_FREE_OTHERS, FREE_BOTH };
+
 /*
  * Compute @malloc() or @calloc() insts that could be transformed to allocaInst.
  * Compute @free() insts that could be removed becase if @malloc() is
@@ -43,6 +45,10 @@ LiveMemorySummary PrivatizerManager::getLiveMemorySummary(Noelle &noelle,
   heapAllocInsts.insert(funcSum->callocInsts.begin(),
                         funcSum->callocInsts.end());
 
+  unordered_set<Value *> pointersNeverAccessUnkownMemoryObject;
+  unordered_map<CallBase *, unordered_map<Value *, uint64_t>>
+      allocableReachable;
+
   for (auto heapAllocInst : heapAllocInsts) {
     if (!isFixedSizedHeapAllocation(heapAllocInst)) {
       continue;
@@ -50,26 +56,60 @@ LiveMemorySummary PrivatizerManager::getLiveMemorySummary(Noelle &noelle,
     if (cfgAnalysis.isIncludedInACycle(*heapAllocInst)) {
       continue;
     }
-    if (!funcSum->isAllocableCandidate(heapAllocInst)) {
+
+    unordered_map<Value *, uint64_t> reachablePointers;
+    if (!funcSum->isAllocableCandidate(heapAllocInst, reachablePointers)) {
       continue;
     }
     allocable.insert(heapAllocInst);
+
+    allocableReachable[heapAllocInst] = reachablePointers;
+    for (auto &[ptr, _] : reachablePointers) {
+      pointersNeverAccessUnkownMemoryObject.insert(ptr);
+    }
   }
 
   if (allocable.empty()) {
     return LiveMemorySummary();
   }
 
-  unordered_set<CallBase *> removable = funcSum->freeInsts;
-  for (auto freeInst : funcSum->freeInsts) {
-    auto ptr = dyn_cast<CallBase>(freeInst->getArgOperand(0));
-    if (!ptr || allocable.count(ptr) == 0) {
-      allocable.clear();
-      removable.clear();
-      break;
-    } else {
-      removable.insert(freeInst);
+  unordered_set<CallBase *> removable;
+
+  auto checkFreeType = [&](CallBase *freeInst) -> FreeType {
+    assert(funcSum->freeInsts.count(freeInst) > 0);
+    auto freePointer = freeInst->getArgOperand(0);
+    for (auto &[heapAllocInst, reachablePointers] : allocableReachable) {
+      if (reachablePointers.count(freePointer) == 0) {
+        continue;
+      }
+      if (reachablePointers[freePointer] != 1) {
+        continue;
+      }
+      bool onlyFreeAllocable = true;
+      for (auto storeInst : funcSum->storeInsts) {
+        auto storePointer = storeInst->getPointerOperand();
+        auto valuePointer = storeInst->getValueOperand();
+        if (reachablePointers.count(storePointer) > 0
+            && reachablePointers[storePointer] == 2) {
+          if (pointersNeverAccessUnkownMemoryObject.count(valuePointer) == 0) {
+            onlyFreeAllocable = false;
+            break;
+          }
+        }
+      }
+      if (onlyFreeAllocable) {
+        removable.insert(freeInst);
+        return ONLY_FREE_ALLOCABLE;
+      } else {
+        allocable.erase(heapAllocInst);
+        return FREE_BOTH;
+      }
     }
+    return ONLY_FREE_OTHERS;
+  };
+
+  for (auto freeInst : funcSum->freeInsts) {
+    checkFreeType(freeInst);
   }
 
   LiveMemorySummary memSum = LiveMemorySummary();

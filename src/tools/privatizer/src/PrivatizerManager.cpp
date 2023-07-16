@@ -65,9 +65,6 @@ bool PrivatizerManager::runOnModule(Module &M) {
     delete summary;
   }
 
-  auto mainF = M.getFunction("main");
-  errs() << *mainF << "\n";
-
   return modified;
 }
 

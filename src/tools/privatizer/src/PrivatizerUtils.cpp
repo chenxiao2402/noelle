@@ -36,15 +36,14 @@ enum MPAFunctionType {
 };
 
 MPAFunctionType getCalleeFunctionType(CallBase *callInst) {
-  const set<std::string> READ_ONLY_LIB_FUNCTIONS = {
+  const set<string> READ_ONLY_LIB_FUNCTIONS = {
     "atoi",   "atof",    "atol",   "atoll",  "fprintf", "fputc", "fputs",
     "putc",   "putchar", "printf", "puts",   "rand",    "scanf", "sqrt",
     "strlen", "strncmp", "strtod", "strtol", "strtoll"
   };
 
-  const set<std::string> READ_ONLY_LIB_FUNCTIONS_WITH_SUFFIX =
-      [&]() -> std::set<std::string> {
-    std::set<std::string> result;
+  const set<string> READ_ONLY_LIB_FUNCTIONS_WITH_SUFFIX = [&]() -> set<string> {
+    set<string> result;
     for (auto fname : READ_ONLY_LIB_FUNCTIONS) {
       result.insert(fname);
       result.insert(fname + "_unlocked");
@@ -133,7 +132,9 @@ bool FunctionSummary::stackHasEnoughSpaceForNewAllocaInst(
   }
 }
 
-bool FunctionSummary::isAllocableCandidate(Value *source) {
+bool FunctionSummary::isAllocableCandidate(
+    Value *source,
+    unordered_map<Value *, uint64_t> &reachablePointers) {
   auto heapAllocOrGlobalVar = false;
   if (isa<GlobalVariable>(source)) {
     heapAllocOrGlobalVar = true;
@@ -149,17 +150,59 @@ bool FunctionSummary::isAllocableCandidate(Value *source) {
     return false;
   }
 
-  unordered_set<Value *> reachableValues;
+  reachablePointers.clear();
   queue<pair<Value *, int>> worklist;
   worklist.push(make_pair(source, 1));
 
   while (!worklist.empty()) {
     auto [v, ptLevel] = worklist.front();
     worklist.pop();
-    if (reachableValues.find(v) != reachableValues.end()) {
+    if (reachablePointers.count(v) > 0) {
       continue;
     }
-    reachableValues.insert(v);
+    reachablePointers[v] = ptLevel;
+
+    if (isa<Argument>(v)) {
+      return false;
+    } else if (isa<CallBase>(v)) {
+      auto callInst = dyn_cast<CallBase>(v);
+      auto calleeFuncType = getCalleeFunctionType(callInst);
+      if (calleeFuncType == MALLOC || calleeFuncType == CALLOC) {
+        // known heap allocation, do nothing
+      } else if (calleeFuncType == REALLOC) {
+        worklist.push(make_pair(callInst->getOperand(0), ptLevel));
+      } else if (calleeFuncType == USER_DEFINED || calleeFuncType == UNKNOWN) {
+        return false;
+      } else {
+        assert(false);
+      }
+    }
+
+    if (isa<BitCastInst>(v)) {
+      auto bitcastInst = dyn_cast<BitCastInst>(v);
+      worklist.push(make_pair(bitcastInst->getOperand(0), ptLevel));
+    } else if (isa<BitCastOperator>(v)) {
+      auto bitcastOperator = dyn_cast<BitCastOperator>(v);
+      worklist.push(make_pair(bitcastOperator->getOperand(0), ptLevel));
+    } else if (isa<GetElementPtrInst>(v)) {
+      auto gepInst = dyn_cast<GetElementPtrInst>(v);
+      worklist.push(make_pair(gepInst->getPointerOperand(), ptLevel));
+    } else if (isa<GEPOperator>(v)) {
+      auto gepOperator = dyn_cast<GEPOperator>(v);
+      worklist.push(make_pair(gepOperator->getPointerOperand(), ptLevel));
+    } else if (isa<PHINode>(v)) {
+      auto phiNode = dyn_cast<PHINode>(v);
+      for (auto i = 0; i < phiNode->getNumIncomingValues(); i++) {
+        worklist.push(make_pair(phiNode->getIncomingValue(i), ptLevel));
+      }
+    } else if (isa<SelectInst>(v)) {
+      auto selectInst = dyn_cast<SelectInst>(v);
+      worklist.push(make_pair(selectInst->getTrueValue(), ptLevel));
+      worklist.push(make_pair(selectInst->getFalseValue(), ptLevel));
+    } else if (isa<LoadInst>(v)) {
+      auto loadInst = dyn_cast<LoadInst>(v);
+      worklist.push(make_pair(loadInst->getPointerOperand(), ptLevel + 1));
+    }
 
     for (auto user : v->users()) {
       if (isa<BitCastInst>(user) || isa<BitCastOperator>(user)) {
@@ -181,14 +224,14 @@ bool FunctionSummary::isAllocableCandidate(Value *source) {
         auto callInst = dyn_cast<CallBase>(user);
         auto calleeFuncType = getCalleeFunctionType(callInst);
 
-        if (calleeFuncType == MALLOC || calleeFuncType == CALLOC
-            || calleeFuncType == REALLOC || calleeFuncType == FREE
-            || calleeFuncType == INTRINSIC || calleeFuncType == READ_ONLY) {
-          continue;
+        if (calleeFuncType == REALLOC) {
+          worklist.push(make_pair(callInst, ptLevel));
         } else if (calleeFuncType == MEM_COPY) {
           auto memcpyInst = dyn_cast<MemCpyInst>(callInst);
-          if (memcpyInst->getDest() == v) {
+          if (memcpyInst->getDest() == v && ptLevel == 1) {
             return false;
+          } else if (memcpyInst->getSource() == v && ptLevel > 1) {
+            worklist.push(make_pair(memcpyInst->getDest(), ptLevel));
           } else if (memcpyInst->getSource() == v) {
             worklist.push(make_pair(memcpyInst->getDest(), ptLevel));
           }
@@ -202,16 +245,16 @@ bool FunctionSummary::isAllocableCandidate(Value *source) {
             auto operand = callInst->getArgOperand(arg.getOperandNo());
             auto argument = calleeFunc->args().begin() + arg.getOperandNo();
             if (operand == v) {
-              if (!argument->hasNoCaptureAttr()) {
-                return false;
-              }
+              return false;
             }
           }
-        } else if (isa<Argument>(user) || isa<ReturnInst>(user)) {
-          return false;
         } else {
-          worklist.push(make_pair(user, ptLevel));
+          continue;
         }
+      } else if (isa<ReturnInst>(user)) {
+        return false;
+      } else {
+        worklist.push(make_pair(user, ptLevel));
       }
     }
   }
@@ -333,7 +376,7 @@ UserSummary::UserSummary(GlobalVariable *globalVar) {
       for (auto opUser : op->users()) {
         worklist.push(opUser);
         isDirectUser.push(false);
-        inst2op[opUser].insert(user);
+        inst2op[opUser].insert(op);
       }
     }
   }

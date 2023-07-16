@@ -44,7 +44,9 @@ public:
   std::unordered_set<CallBase *> freeInsts;
   std::unordered_set<StoreInst *> storeInsts;
 
-  bool isAllocableCandidate(Value *source);
+  bool isAllocableCandidate(
+      Value *source,
+      unordered_map<Value *, uint64_t> &reachablePointers);
   bool stackHasEnoughSpaceForNewAllocaInst(uint64_t allocationSize);
 
 private:

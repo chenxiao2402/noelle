@@ -58,10 +58,11 @@ unordered_set<Function *> PrivatizerManager::getPrivatizableFunctions(
   } else if (privatizableFunctions.size() == 1) {
     auto currentF = *privatizableFunctions.begin();
     auto funcSum = functionSummaries[currentF];
+    unordered_map<Value *, uint64_t> reachablePointers;
 
     if (mayInvoke(currentF, currentF)) {
       return {};
-    } else if (!funcSum->isAllocableCandidate(globalVar)) {
+    } else if (!funcSum->isAllocableCandidate(globalVar, reachablePointers)) {
       return {};
     } else if (!globalVariableInitializedInFunction(noelle,
                                                     globalVar,
@@ -81,8 +82,9 @@ unordered_set<Function *> PrivatizerManager::getPrivatizableFunctions(
 
     for (auto currentF : privatizableFunctions) {
       auto funcSum = functionSummaries[currentF];
+      unordered_map<Value *, uint64_t> reachablePointers;
 
-      if (!funcSum->isAllocableCandidate(globalVar)) {
+      if (!funcSum->isAllocableCandidate(globalVar, reachablePointers)) {
         return {};
       } else if (!globalVariableInitializedInFunction(noelle,
                                                       globalVar,
