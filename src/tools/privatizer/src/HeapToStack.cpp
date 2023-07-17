@@ -23,8 +23,6 @@
 
 namespace llvm::noelle {
 
-enum FreeType { ONLY_FREE_ALLOCABLE, ONLY_FREE_OTHERS, FREE_BOTH };
-
 /*
  * Compute @malloc() or @calloc() insts that could be transformed to allocaInst.
  * Compute @free() insts that could be removed becase if @malloc() is
@@ -40,14 +38,37 @@ LiveMemorySummary PrivatizerManager::getLiveMemorySummary(Noelle &noelle,
    * Only fixed size @malloc(), such as %1 = tail call i8* @malloc(i64 8), can
    * be transformed to allocaInst. Otherwise, it may cause stack overflow.
    */
-  unordered_set<CallBase *> allocable;
   auto heapAllocInsts = funcSum->mallocInsts;
   heapAllocInsts.insert(funcSum->callocInsts.begin(),
                         funcSum->callocInsts.end());
 
-  unordered_set<Value *> pointersNeverAccessUnkownMemoryObject;
-  unordered_map<CallBase *, unordered_map<Value *, uint64_t>>
-      allocableReachable;
+  /*
+   * allocaCandidates is a map:
+   * key: a @malloc or @calloc inst that may be transformed to allocaInst,
+   *      such a inst will be called "alloca candidate".
+   * value: all pointers that can direct or recursively point to the
+   *        memory object allocated by the key, and their pointing levels.
+   *
+   * Assume we have:
+   * %1 = tail call i8* @malloc(i64 8)
+   * %2 = bitcast i8* %1 to i32**
+   * store %2, i32*** %3
+   * %4 = load i32*** %3
+   *
+   * We start from the memory object allocated by @malloc,
+   * it will be called M1.
+   *
+   * The pointing level of M1 is always 0,
+   * even though the data in M1 may have i32* type.
+   *
+   * Therefore, %1, the direct pointer to the has pointing level 1.
+   * %2 is a bitcast of %1, they have the same pointing level 1,
+   * even though %1 and %2 have different types.
+   *
+   * %2 is stored in %3, so %3 has pointing level 2 (one higher than %2).
+   * %4 is loaded from %3, so %4 has pointing level 1 (one lower than %3).
+   */
+  unordered_map<CallBase *, unordered_map<Value *, uint64_t>> allocaCandidates;
 
   for (auto heapAllocInst : heapAllocInsts) {
     if (!isFixedSizedHeapAllocation(heapAllocInst)) {
@@ -61,55 +82,119 @@ LiveMemorySummary PrivatizerManager::getLiveMemorySummary(Noelle &noelle,
     if (!funcSum->isAllocableCandidate(heapAllocInst, reachablePointers)) {
       continue;
     }
-    allocable.insert(heapAllocInst);
 
-    allocableReachable[heapAllocInst] = reachablePointers;
-    for (auto &[ptr, _] : reachablePointers) {
-      pointersNeverAccessUnkownMemoryObject.insert(ptr);
+    allocaCandidates[heapAllocInst] = reachablePointers;
+  }
+
+  /*
+   * Compute all pointers that can direct or recursively point to
+   * all memory objects allocated alloca candidates.
+   */
+  auto getKnownPointers = [&]() -> unordered_set<Value *> {
+    unordered_set<Value *> knownPointers;
+    for (auto &[_, reachablePointers] : allocaCandidates) {
+      for (auto &[pointer, _] : reachablePointers) {
+        knownPointers.insert(pointer);
+      }
     }
-  }
+    return knownPointers;
+  };
 
-  if (allocable.empty()) {
-    return LiveMemorySummary();
-  }
-
-  unordered_set<CallBase *> removable;
-
-  auto checkFreeType = [&](CallBase *freeInst) -> FreeType {
+  /*
+   * Find direct pointers to all memory objects that may be freed by @free()
+   * inst. Each pointer can either be an alloca candidate or a NULL. Here NULL
+   * means the memory object is not allocated by any alloca candidate.
+   */
+  auto getFreedMemoryObjects =
+      [&](CallBase *freeInst) -> unordered_set<CallBase *> {
     assert(funcSum->freeInsts.count(freeInst) > 0);
+    auto knownPointers = getKnownPointers();
     auto freePointer = freeInst->getArgOperand(0);
-    for (auto &[heapAllocInst, reachablePointers] : allocableReachable) {
-      if (reachablePointers.count(freePointer) == 0) {
+    unordered_set<CallBase *> mayBeFreed;
+
+    for (auto &[heapAllocInst, reachablePointers] : allocaCandidates) {
+      if (reachablePointers.count(freePointer) == 0
+          || reachablePointers[freePointer] != 1) {
         continue;
       }
-      if (reachablePointers[freePointer] != 1) {
-        continue;
-      }
-      bool onlyFreeAllocable = true;
+
+      mayBeFreed.insert(heapAllocInst);
       for (auto storeInst : funcSum->storeInsts) {
         auto storePointer = storeInst->getPointerOperand();
-        auto valuePointer = storeInst->getValueOperand();
+        auto storeValue = storeInst->getValueOperand();
         if (reachablePointers.count(storePointer) > 0
-            && reachablePointers[storePointer] == 2) {
-          if (pointersNeverAccessUnkownMemoryObject.count(valuePointer) == 0) {
-            onlyFreeAllocable = false;
-            break;
+            && reachablePointers[storePointer] >= 2) {
+          if (knownPointers.count(storeValue) == 0) {
+            mayBeFreed.insert(NULL);
           }
         }
       }
-      if (onlyFreeAllocable) {
-        removable.insert(freeInst);
-        return ONLY_FREE_ALLOCABLE;
-      } else {
-        allocable.erase(heapAllocInst);
-        return FREE_BOTH;
-      }
     }
-    return ONLY_FREE_OTHERS;
+
+    if (mayBeFreed.empty()) {
+      mayBeFreed.insert(NULL);
+    }
+
+    return mayBeFreed;
   };
 
+  /*
+   * Assume we have:
+   *   %1 = tail call i8* @malloc(i64 8)
+   *   %2 = tail call i8* @malloc(i64 8)
+   *   %3 = tail call i8* @malloc(i64 8)
+   *   call free(%4);
+   *   call free(%5);
+   * where %1, %2 are alloca candidates; while %3 is not.
+   * %4 may free memory object allocated by %1, %2.
+   * %5 may free memory object allocated by %2, %3.
+   *
+   * It turns out we can't optimize anything.
+   * Since %3 is not an alloca candidate, we can't remove @free(%5).
+   * This means %2 should not be transformed to allocaInst either.
+   * Since %2 can't be transformed to allocaInst, we can't remove @free(%4).
+   * This means %1 also shouldn't be transformed to allocaInst.
+   *
+   * Therefore, if the memory object allocated by an alloca candidate
+   * can be freed by a @free() inst that may also free memory objecys
+   * allocated by a non-alloca-candidate, the alloca candidate is not
+   * an alloca candidate anymore.
+   */
+  bool fixedPoint = false;
+  while (!fixedPoint) {
+    fixedPoint = true;
+    for (auto freeInst : funcSum->freeInsts) {
+      auto mayBeFreed = getFreedMemoryObjects(freeInst);
+      if (mayBeFreed.count(NULL) > 0) {
+        for (auto heapAllocInst : mayBeFreed) {
+          if (heapAllocInst != NULL
+              && allocaCandidates.count(heapAllocInst) > 0) {
+            allocaCandidates.erase(heapAllocInst);
+            fixedPoint = false;
+          }
+        }
+      }
+    }
+  }
+
+  /*
+   * The remaining alloca candidates can be safely transformed to allocaInst.
+   */
+  unordered_set<CallBase *> allocable;
+  for (auto &[heapAllocInst, _] : allocaCandidates) {
+    allocable.insert(heapAllocInst);
+  }
+
+  /*
+   * If a @free() inst can only free memory objects allocated by the remaining
+   * alloca candidates, we can safely remove the @free() inst.
+   */
+  unordered_set<CallBase *> removable;
   for (auto freeInst : funcSum->freeInsts) {
-    checkFreeType(freeInst);
+    auto mayBeFreed = getFreedMemoryObjects(freeInst);
+    if (mayBeFreed.count(NULL) == 0) {
+      removable.insert(freeInst);
+    }
   }
 
   LiveMemorySummary memSum = LiveMemorySummary();
