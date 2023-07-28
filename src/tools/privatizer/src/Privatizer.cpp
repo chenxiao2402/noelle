@@ -20,15 +20,15 @@
  OR OTHER DEALINGS IN THE SOFTWARE.
  */
 #include "noelle/core/Noelle.hpp"
-#include "PrivatizerManager.hpp"
+#include "Privatizer.hpp"
 
 namespace llvm::noelle {
 
-PrivatizerManager::PrivatizerManager() : ModulePass{ ID } {
+Privatizer::Privatizer() : ModulePass{ ID } {
   return;
 }
 
-bool PrivatizerManager::runOnModule(Module &M) {
+bool Privatizer::runOnModule(Module &M) {
 
   /*
    * Check if enablers have been enabled.
@@ -36,36 +36,32 @@ bool PrivatizerManager::runOnModule(Module &M) {
   if (!this->enablePrivatizer) {
     return false;
   }
-  auto prefix = "PrivatizerManager: ";
+  auto prefix = "Privatizer: ";
   errs() << prefix << "Start\n";
 
   /*
    * Fetch NOELLE.
    */
   auto &noelle = getAnalysis<Noelle>();
-
   auto modified = false;
+  modified |= applyG2S(noelle);
+  modified |= applyH2S(noelle);
 
-  for (auto &F : M) {
-    if (F.isDeclaration()) {
-      continue;
-    }
-    functionSummaries[&F] = new FunctionSummary{ &F };
+  return modified;
+}
+
+FunctionSummary *Privatizer::getFunctionSummary(Function *f) {
+  if (functionSummaries.find(f) == functionSummaries.end()) {
+    functionSummaries[f] = new FunctionSummary{ f };
   }
+  return functionSummaries[f];
+}
 
-  for (auto &[globalVar, privariableFunctions] : collectGlobalToStack(noelle)) {
-    modified |= applyGlobalToStack(noelle, globalVar, privariableFunctions);
-  }
-
-  for (auto &[f, liveMemSum] : collectHeapToStack(noelle)) {
-    modified |= applyHeapToStack(noelle, liveMemSum);
-  }
-
+void Privatizer::clearFunctionSummaries() {
   for (auto &[f, summary] : functionSummaries) {
     delete summary;
   }
-
-  return modified;
+  functionSummaries.clear();
 }
 
 } // namespace llvm::noelle

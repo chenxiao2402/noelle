@@ -19,8 +19,7 @@
  OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE
  OR OTHER DEALINGS IN THE SOFTWARE.
  */
-#include "PrivatizerManager.hpp"
-
+#include "Privatizer.hpp"
 namespace llvm::noelle {
 
 static cl::opt<bool> DisablePrivatizer("noelle-disable-privatizer",
@@ -28,7 +27,7 @@ static cl::opt<bool> DisablePrivatizer("noelle-disable-privatizer",
                                        cl::Hidden,
                                        cl::desc("Disable all privatizers"));
 
-bool PrivatizerManager::doInitialization(Module &M) {
+bool Privatizer::doInitialization(Module &M) {
   this->M = &M;
 
   this->enablePrivatizer =
@@ -37,32 +36,32 @@ bool PrivatizerManager::doInitialization(Module &M) {
   return false;
 }
 
-void PrivatizerManager::getAnalysisUsage(AnalysisUsage &AU) const {
+void Privatizer::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addRequired<Noelle>();
   return;
 }
 
 // Next there is code to register your pass to "opt"
-char PrivatizerManager::ID = 0;
-static RegisterPass<PrivatizerManager> X(
+char Privatizer::ID = 0;
+static RegisterPass<Privatizer> X(
     "privatizer",
     "Transforms to turn @malloc() / @calloc() and global variables to allocaInst");
 
 // Next there is code to register your pass to "clang"
-static PrivatizerManager *_PassMaker = NULL;
+static Privatizer *_PassMaker = NULL;
 static RegisterStandardPasses _RegPass1(PassManagerBuilder::EP_OptimizerLast,
                                         [](const PassManagerBuilder &,
                                            legacy::PassManagerBase &PM) {
                                           if (!_PassMaker) {
                                             PM.add(_PassMaker =
-                                                       new PrivatizerManager());
+                                                       new Privatizer());
                                           }
                                         }); // ** for -Ox
 static RegisterStandardPasses _RegPass2(
     PassManagerBuilder::EP_EnabledOnOptLevel0,
     [](const PassManagerBuilder &, legacy::PassManagerBase &PM) {
       if (!_PassMaker) {
-        PM.add(_PassMaker = new PrivatizerManager());
+        PM.add(_PassMaker = new Privatizer());
       }
     }); // ** for -O0
 
