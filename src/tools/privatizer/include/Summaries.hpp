@@ -35,7 +35,7 @@ public:
 
 class FunctionSummary {
 public:
-  FunctionSummary(Function *currentF);
+  FunctionSummary(Function *currentF, bool printMpaInfo);
 
   Function *currentF;
 
@@ -54,11 +54,13 @@ public:
   bool stackHasEnoughSpaceForNewAllocaInst(uint64_t allocationSize);
 
 private:
+  bool printMpaInfo = false;
   const uint64_t STACK_SIZE_THRESHOLD = 8 * 1024 * 1024;
-  uint64_t stackMemoryUsage;
+  uint64_t stackMemoryUsage = 0;
 
+  bool mpaFinished = false;
   NodeID nextNodeId = 0;
-  GlobalVariable *allocaCandidate;
+  GlobalVariable *allocaCandidate = nullptr;
   queue<NodeID> worklist;
 
   unordered_set<Value *> returnPointers;

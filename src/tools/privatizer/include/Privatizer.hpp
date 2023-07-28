@@ -50,6 +50,8 @@ private:
 
   unordered_map<Function *, FunctionSummary *> functionSummaries;
 
+  bool verbose;
+
   FunctionSummary *getFunctionSummary(Function *f);
 
   void clearFunctionSummaries();

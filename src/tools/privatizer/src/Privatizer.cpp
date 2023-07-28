@@ -43,6 +43,8 @@ bool Privatizer::runOnModule(Module &M) {
    * Fetch NOELLE.
    */
   auto &noelle = getAnalysis<Noelle>();
+  verbose = noelle.getVerbosity() > Verbosity::Maximal;
+
   auto modified = false;
   modified |= applyG2S(noelle);
   modified |= applyH2S(noelle);
@@ -52,7 +54,7 @@ bool Privatizer::runOnModule(Module &M) {
 
 FunctionSummary *Privatizer::getFunctionSummary(Function *f) {
   if (functionSummaries.find(f) == functionSummaries.end()) {
-    functionSummaries[f] = new FunctionSummary{ f };
+    functionSummaries[f] = new FunctionSummary{ f, verbose };
   }
   return functionSummaries[f];
 }

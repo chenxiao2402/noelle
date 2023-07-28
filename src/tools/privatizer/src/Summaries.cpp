@@ -22,13 +22,13 @@
 #include "Privatizer.hpp"
 #include "Summaries.hpp"
 #include "Utils.hpp"
+#include "llvm/Support/raw_ostream.h"
 
 namespace llvm::noelle {
 
-FunctionSummary::FunctionSummary(Function *currentF) {
-  this->currentF = currentF;
-  this->stackMemoryUsage = 0;
-  auto dl = currentF->getParent()->getDataLayout();
+FunctionSummary::FunctionSummary(Function *currentF, bool printMpaInfo)
+  : currentF(currentF),
+    printMpaInfo(printMpaInfo) {
 
   auto insertPointer = [&](Value *v) {
     if (v->getType()->isPointerTy()) {
@@ -67,6 +67,7 @@ FunctionSummary::FunctionSummary(Function *currentF) {
         auto allocaInst = dyn_cast<AllocaInst>(&inst);
         insertPointer(allocaInst);
         this->allocaInsts.insert(allocaInst);
+        auto dl = currentF->getParent()->getDataLayout();
         stackMemoryUsage +=
             allocaInst->getAllocationSizeInBits(dl).getValue() / 8;
       } else if (isa<CallBase>(inst)) {
@@ -111,7 +112,8 @@ FunctionSummary::FunctionSummary(Function *currentF) {
 bool FunctionSummary::mayEscape(CallBase *heapAllocInst) {
   assert(mallocInsts.find(heapAllocInst) != mallocInsts.end()
          || callocInsts.find(heapAllocInst) != callocInsts.end());
-  if (nextNodeId == 0) {
+  if (!mpaFinished) {
+    allocaCandidate = nullptr;
     mayPointsToAnalysis();
   }
   auto memObjId = memobj2nodeId[heapAllocInst];
@@ -126,7 +128,7 @@ bool FunctionSummary::mayEscape(GlobalVariable *globalVar) {
 }
 
 bool FunctionSummary::isDestOfMemcpy(Value *v) {
-  assert(nextNodeId > 0);
+  assert(mpaFinished);
   if (ptr2nodeId.find(v) == ptr2nodeId.end()) {
     return false;
   }
@@ -239,10 +241,52 @@ bool FunctionSummary::addCopyEdge(NodeID src, NodeID dst) {
 void FunctionSummary::mayPointsToAnalysis(void) {
   initPtInfo();
   solveWorklist();
+  mpaFinished = true;
+
+  if (printMpaInfo) {
+    errs() << "May Points-to Analysis for function @" << currentF->getName()
+           << "\n";
+    errs() << *currentF << "\n";
+
+    errs() << "NodeIDs of memory objects:\n";
+    for (auto &[allocation, memobjId] : memobj2nodeId) {
+      if (allocation) {
+        errs() << "\tmemobjId : " << memobjId << " , " << *allocation << "\n";
+      } else {
+        errs() << "\tmemobjId : " << memobjId << " , "
+               << "UNKNOWN"
+               << "\n";
+      }
+    }
+
+    errs() << "NodeIDs of pointers:\n";
+    for (auto &[ptr, ptrId] : ptr2nodeId) {
+      errs() << "\tptrId : " << ptrId << " , " << *ptr << "\n";
+    }
+
+    errs() << "Points-to relation:\n";
+    for (auto &[nodeId, pointees] : pointsTo) {
+      errs() << "\t" << nodeId << " -> ";
+      for (auto pointee : pointees.set_bits()) {
+        errs() << pointee << ", ";
+      }
+      errs() << "\n";
+    }
+
+    errs() << "Copy out edges:\n";
+    for (auto &[src, dests] : copyOutEdges) {
+      errs() << "\t" << src << " => ";
+      for (auto dest : dests) {
+        errs() << dest << ", ";
+      }
+      errs() << "\n";
+    }
+  }
 }
 
 void FunctionSummary::initPtInfo(void) {
 
+  mpaFinished = false;
   nextNodeId = 0;
   ptr2nodeId.clear();
   nodeId2memobj.clear();
@@ -326,12 +370,6 @@ void FunctionSummary::initPtInfo(void) {
         case UNKNOWN:
           pointsTo[ptrId] = onlyPointsTo(unknownMemobjId);
           addCopyEdge(unknownMemobjId, ptrId);
-          for (auto &arg : callInst->arg_operands()) {
-            auto operand = callInst->getArgOperand(arg.getOperandNo());
-            if (operand->getType()->isPointerTy()) {
-              addCopyEdge(getPtrId(operand), unknownMemobjId);
-            }
-          }
           break;
         default:
           break;
@@ -364,6 +402,7 @@ void FunctionSummary::initPtInfo(void) {
           case USER_DEFINED:
           case UNKNOWN:
             usedAsFuncArg.insert(ptrId);
+            addCopyEdge(ptrId, unknownMemobjId);
           default:
             break;
         }
@@ -409,7 +448,6 @@ void FunctionSummary::handleFuncUsers(NodeID ptrId) {
   if (usedAsFuncArg.find(ptrId) == usedAsFuncArg.end()) {
     return;
   }
-
   NodeID unknownMemobjId = 0;
   for (auto memobjId : getReachableMemobjs(ptrId)) {
     bool changed = false;
@@ -422,7 +460,9 @@ void FunctionSummary::handleFuncUsers(NodeID ptrId) {
 }
 
 void FunctionSummary::handleCopyEdges(NodeID srcId) {
-  auto pointees = getReachableMemobjs(srcId);
+  if (copyOutEdges.find(srcId) == copyOutEdges.end()) {
+    return;
+  }
   for (auto &destId : copyOutEdges[srcId]) {
     if (unionPts(srcId, destId)) {
       worklist.push(destId);
@@ -432,8 +472,9 @@ void FunctionSummary::handleCopyEdges(NodeID srcId) {
 
 bool FunctionSummary::unionPts(NodeID srcId, NodeID dstId) {
   BitVector oldPts = pointsTo[dstId];
-  pointsTo[dstId] |= pointsTo[srcId];
-  return pointsTo[dstId] != oldPts;
+  BitVector newPts = unite(oldPts, pointsTo[srcId]);
+  pointsTo[dstId] = newPts;
+  return oldPts != newPts;
 }
 
 UserSummary::UserSummary(GlobalVariable *globalVar) {
