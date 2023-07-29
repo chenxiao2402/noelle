@@ -21,7 +21,6 @@
  */
 #include "Privatizer.hpp"
 #include "Utils.hpp"
-
 namespace llvm::noelle {
 
 MPAFunctionType getCalleeFunctionType(CallBase *callInst) {
@@ -152,6 +151,13 @@ unordered_set<Function *> functionsInvokedFrom(Noelle &noelle,
 
   return funcSet;
 };
+
+unordered_set<Function *> hotFunctions(Noelle &noelle) {
+  auto mainF = noelle.getFunctionsManager()->getEntryFunction();
+  auto hotFuncs = functionsInvokedFrom(noelle, mainF);
+  hotFuncs.insert(mainF);
+  return hotFuncs;
+}
 
 Value *strip(Value *pointer) {
   assert(pointer != nullptr || pointer->getType()->isPointerTy());

@@ -47,9 +47,7 @@ unordered_set<Function *> Privatizer::getPrivatizableFunctions(
   };
 
   auto privatizable = [&]() {
-    auto mainF = noelle.getFunctionsManager()->getEntryFunction();
-    auto hotFuncs = functionsInvokedFrom(noelle, mainF);
-    hotFuncs.insert(mainF);
+    auto hotFuncs = hotFunctions(noelle);
     auto userFuncs = UserSummary(globalVar).userFunctions;
 
     unordered_set<Function *> result;
@@ -61,21 +59,29 @@ unordered_set<Function *> Privatizer::getPrivatizableFunctions(
     return result;
   }();
 
-  errs() << "Privatizer: " << globalVarName << " is used in "
-         << privatizable.size() << " functions\n";
-  for (auto f : privatizable) {
-    errs() << "Privatizer: " << f->getName() << "\n";
-  }
-
+  /*
+   * If we want to privatize a global variable into an AllocaInst in a function:
+   *
+   * 1. Pretend the global variable to be an allocaInst, if it doesn't escape,
+   *    then the global variable could be privatized without core dump.
+   * 2. The global variable should be initialized before any use.
+   * 3. The global variable should not be used by my callee.
+   *
+   * The first condition tells us it's safe to privatize the global variable.
+   * The second and third condition ensure the global variable is only modified
+   * by current function.
+   *
+   * We check all functions that use the global variable and privatize the
+   * global variable to all of them if they all satisfy the above conditions.
+   * Otherwise, the global variable can't be privatized to any function.
+   */
   if (privatizable.size() == 1) {
     auto currentF = *privatizable.begin();
     auto funcSum = getFunctionSummary(currentF);
 
     if (mayInvoke(currentF, currentF)) {
       return {};
-    } else if (!globalVariableInitializedInFunction(noelle,
-                                                    globalVar,
-                                                    currentF)) {
+    } else if (!initializedBeforeAllUse(noelle, globalVar, currentF)) {
       return {};
     } else if (funcSum->mayEscape(globalVar)
                || funcSum->isDestOfMemcpy(globalVar)) {
@@ -93,7 +99,7 @@ unordered_set<Function *> Privatizer::getPrivatizableFunctions(
 
     for (auto currentF : privatizable) {
       auto funcSum = getFunctionSummary(currentF);
-      if (!globalVariableInitializedInFunction(noelle, globalVar, currentF)) {
+      if (!initializedBeforeAllUse(noelle, globalVar, currentF)) {
         return {};
       } else if (funcSum->mayEscape(globalVar)
                  || funcSum->isDestOfMemcpy(globalVar)) {
@@ -105,21 +111,30 @@ unordered_set<Function *> Privatizer::getPrivatizableFunctions(
   }
 }
 
-bool Privatizer::globalVariableInitializedInFunction(Noelle &noelle,
-                                                     GlobalVariable *globalVar,
-                                                     Function *currentF) {
+bool Privatizer::initializedBeforeAllUse(Noelle &noelle,
+                                         GlobalVariable *globalVar,
+                                         Function *currentF) {
 
   auto funcSum = getFunctionSummary(currentF);
   auto initCandidates = funcSum->storeInsts;
   auto userInsts = UserSummary(globalVar).userInsts[currentF];
 
+  /*
+   * The global variable should be initialized before all use.
+   *
+   * We try to find find a store instruction that will overwrite the
+   * whole memory object of the global variable, initializers refer to
+   * the instructions that will initialize the global variable.
+   *
+   * Each user of the global variable should either be part of initializers,
+   * or be dominated by the initialization. Otherwise, the global variable
+   * is not initialized before all use.
+   */
   auto initDominateAllUsers = [&](StoreInst *storeInst) {
     auto DS = noelle.getDominators(currentF);
     unordered_set<Instruction *> initializers;
-    auto initProgramPoint = getProgramPointOfInitilization(noelle,
-                                                           globalVar,
-                                                           storeInst,
-                                                           initializers);
+    auto initProgramPoint =
+        getInitProgramPoint(noelle, globalVar, storeInst, initializers);
     if (!initProgramPoint) {
       return false;
     }
@@ -160,7 +175,7 @@ bool Privatizer::globalVariableInitializedInFunction(Noelle &noelle,
  * If so, try to find the program point where the global variable is
  * initialized. If not, return nullptr.
  */
-Instruction *Privatizer::getProgramPointOfInitilization(
+Instruction *Privatizer::getInitProgramPoint(
     Noelle &noelle,
     GlobalVariable *globalVar,
     StoreInst *storeInst,
@@ -173,7 +188,6 @@ Instruction *Privatizer::getProgramPointOfInitilization(
     initializers = { storeInst };
     return storeInst;
   } else if (globalVarType->isPointerTy()) {
-
     if (pointer == globalVar) {
       initializers = { storeInst };
       return storeInst;
@@ -191,7 +205,17 @@ Instruction *Privatizer::getProgramPointOfInitilization(
       }
     }
   } else if (globalVar->getValueType()->isArrayTy()) {
-
+    /*
+     * If the global variable is single value type or pointer type, then
+     * it could be initialized by one store instruction.
+     *
+     * However, if the global variable is array type, then it should be
+     * initialized in a loop. Here we try to check that the loop traverses
+     * each element of the global array and rewrite the element.
+     *
+     * The first instruction of the exitnode of the loop is the program
+     * point where the global variable is initialized.
+     */
     auto globalGEP = dyn_cast<GetElementPtrInst>(pointer);
     if (!globalGEP || globalGEP->getPointerOperand() != globalVar) {
       return nullptr;
@@ -242,12 +266,18 @@ Instruction *Privatizer::getProgramPointOfInitilization(
       return nullptr;
     }
 
+    bool GIVisIndex = false;
     for (auto &index : globalGEP->indices()) {
       if (isa<ConstantInt>(index)) {
         continue;
       } else if (index == IV->getLoopEntryPHI()) {
+        GIVisIndex = true;
         continue;
       }
+      return nullptr;
+    }
+
+    if (!GIVisIndex) {
       return nullptr;
     }
 
@@ -302,61 +332,37 @@ bool Privatizer::transformG2S(Noelle &noelle,
                               unordered_set<Function *> privatizable) {
   bool modified = false;
 
-  for (auto currentF : privatizable) {
-    auto fname = currentF->getName();
-    auto funcSum = getFunctionSummary(currentF);
-    auto suffix = " in function " + fname + "\n";
-    auto globalVarName = globalVar->getName();
-    errs() << prefix << "Try to privatize global variable @" << globalVarName
-           << suffix;
+  unordered_map<Function *, unordered_set<Instruction *>> directUses;
+  unordered_map<Function *,
+                unordered_map<BitCastOperator *, unordered_set<Instruction *>>>
+      indirectUses;
 
+  for (auto currentF : privatizable) {
     auto allocationSize = getAllocationSize(globalVar);
-    if (!funcSum->stackHasEnoughSpaceForNewAllocaInst(allocationSize)) {
+    auto funcSum = getFunctionSummary(currentF);
+    auto suffix = " in function " + currentF->getName() + "\n";
+    auto globalVarName = globalVar->getName();
+
+    /*
+     * Check if the stack of current function can hold the memory object.
+     * If global variable is too large for the stack, it should not be
+     * transformed to allocaInst.
+     */
+    if (!funcSum->insertNewAllocaInst(allocationSize)) {
       errs()
           << prefix << "Stack memory usage exceeds the limit, can't privatize "
           << "global variable @" << globalVarName << suffix;
       return false;
     }
 
-    modified = true;
-    auto &context = noelle.getProgramContext();
-    auto &entryBlock = currentF->getEntryBlock();
-    IRBuilder<> entryBuilder(entryBlock.getFirstNonPHI());
-    Type *globalVarType = globalVar->getValueType();
-    AllocaInst *allocaInst =
-        entryBuilder.CreateAlloca(globalVarType, nullptr, globalVarName);
-
-    /*
-     * We don't need to initialize the allocaInst, because it will be
-     * initialized by privatizable functions.
-     */
-
-    // if (globalVar->hasInitializer()) {
-    //   auto initializer = globalVar->getInitializer();
-    //   if (isa<ConstantAggregateZero>(initializer)
-    //       && globalVarType->isArrayTy()) {
-    //     auto typesManager = noelle.getTypesManager();
-    //     auto sizeInByte = typesManager->getSizeOfType(globalVarType);
-    //     auto zeroVal = ConstantInt::get(Type::getInt8Ty(context), 0);
-    //     entryBuilder.CreateMemSet(allocaInst, zeroVal, sizeInByte, 1);
-    //   } else {
-    //     entryBuilder.CreateStore(initializer, allocaInst);
-    //   }
-    // }
-
-    /*
-     * Replace all uses of the global variable in the entry function with an
-     * allocaInst. The allocaInst is placed at the beginning of
-     * the entry block.
-     */
     auto usersToReplace = UserSummary(globalVar).users[currentF];
     assert(!usersToReplace.empty());
 
-    unordered_set<Instruction *> directUsers;
+    unordered_set<Instruction *> instUsers;
     unordered_map<BitCastOperator *, unordered_set<Instruction *>> user2insts;
     for (auto user : usersToReplace) {
       if (isa<Instruction>(user)) {
-        directUsers.insert(dyn_cast<Instruction>(user));
+        instUsers.insert(dyn_cast<Instruction>(user));
       } else if (isa<BitCastOperator>(user)) {
         auto bitCast = dyn_cast<BitCastOperator>(user);
         for (auto userOfBitCast : user->users()) {
@@ -377,11 +383,32 @@ bool Privatizer::transformG2S(Noelle &noelle,
         return false;
       }
     }
+    directUses[currentF] = instUsers;
+    indirectUses[currentF] = user2insts;
+  }
 
-    for (auto inst : directUsers) {
+  for (auto currentF : privatizable) {
+    auto funcSum = getFunctionSummary(currentF);
+    auto suffix = " in function " + currentF->getName() + "\n";
+    auto globalVarName = globalVar->getName();
+
+    modified = true;
+    auto &context = noelle.getProgramContext();
+    auto &entryBlock = currentF->getEntryBlock();
+    IRBuilder<> entryBuilder(entryBlock.getFirstNonPHI());
+    Type *globalVarType = globalVar->getValueType();
+    AllocaInst *allocaInst =
+        entryBuilder.CreateAlloca(globalVarType, nullptr, globalVarName);
+
+    /*
+     * Replace all uses of the global variable in the entry function with an
+     * allocaInst. The allocaInst is placed at the beginning of
+     * the entry block.
+     */
+    for (auto inst : directUses[currentF]) {
       inst->replaceUsesOfWith(globalVar, allocaInst);
     }
-    for (auto &[bitCastOP, insts] : user2insts) {
+    for (auto &[bitCastOP, insts] : indirectUses[currentF]) {
       auto destTy = bitCastOP->getDestTy();
       auto bitCastInst = entryBuilder.CreateBitCast(allocaInst, destTy);
       for (auto inst : insts) {

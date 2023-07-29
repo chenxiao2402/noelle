@@ -44,20 +44,21 @@ LiveMemorySummary Privatizer::getLiveMemorySummary(Noelle &noelle,
   auto cfgAnalysis = noelle.getCFGAnalysis();
   auto funcSum = getFunctionSummary(f);
 
-  /*
-   * Only fixed size @malloc(), such as %1 = tail call i8* @malloc(i64 8), can
-   * be transformed to allocaInst. Otherwise, it may cause stack overflow.
-   */
   auto heapAllocInsts = funcSum->mallocInsts;
   heapAllocInsts.insert(funcSum->callocInsts.begin(),
                         funcSum->callocInsts.end());
 
-  /*
-   * allocable: @malloc() or @calloc() insts that could be transformed to
-   * allocaInst.
-   */
   unordered_set<CallBase *> allocable;
 
+  /*
+   * 1. Only fixed size @malloc(), such as %1 = tail call i8* @malloc(i64 8),
+   * can be transformed to allocaInst. Otherwise, it may cause stack overflow.
+   * 2. @malloc() insts in loops can't be transformed to allocaInst becuase it
+   *    will be executed multiple times.
+   * 3. @malloc() insts that may escape can't be transformed to allocaInst.
+   * 4. Dest of @memcpy() shouldn't be transformed to allocaInst. Otherwise,
+   *    -instCombine pass will incorrectly remove the memcpy.
+   */
   for (auto heapAllocInst : heapAllocInsts) {
     if (!isFixedSizedHeapAllocation(heapAllocInst)) {
       continue;
@@ -91,7 +92,7 @@ LiveMemorySummary Privatizer::getLiveMemorySummary(Noelle &noelle,
    * This means %1 also shouldn't be transformed to allocaInst.
    *
    * Therefore, if the memory object allocated by an allocable
-   * can be freed by a @free() inst that may also free memory objecys
+   * can be freed by a @free() inst that may also free memory objects
    * allocated by a non-allocable, the allocable is not
    * an allocable anymore.
    */
@@ -133,6 +134,8 @@ LiveMemorySummary Privatizer::getLiveMemorySummary(Noelle &noelle,
 unordered_map<Function *, LiveMemorySummary> Privatizer::collectH2S(
     Noelle &noelle) {
 
+  auto hotFuncs = hotFunctions(noelle);
+
   unordered_set<Function *> heapAllocUsers;
   for (auto &F : *M) {
     if (F.getName() != "malloc" && F.getName() != "calloc") {
@@ -140,7 +143,10 @@ unordered_map<Function *, LiveMemorySummary> Privatizer::collectH2S(
     }
     for (auto user : F.users()) {
       if (auto callInst = dyn_cast<CallBase>(user)) {
-        heapAllocUsers.insert(callInst->getFunction());
+        auto userFunc = callInst->getFunction();
+        if (hotFuncs.find(userFunc) != hotFuncs.end()) {
+          heapAllocUsers.insert(userFunc);
+        }
       }
     }
   }
@@ -173,7 +179,12 @@ bool Privatizer::transformH2S(Noelle &noelle, LiveMemorySummary liveMemSum) {
     auto funcSum = getFunctionSummary(currentF);
     auto suffix = " in function " + currentF->getName() + "\n";
 
-    if (!funcSum->stackHasEnoughSpaceForNewAllocaInst(allocationSize)) {
+    /*
+     * Check if the stack of current function can hold the memory object.
+     * If @malloc() allocates an memobj too large for the stack, it should
+     * not be transformed to allocaInst.
+     */
+    if (!funcSum->insertNewAllocaInst(allocationSize)) {
       errs()
           << prefix
           << "Stack memory usage exceeds the limit, can't transfrom to allocaInst: "

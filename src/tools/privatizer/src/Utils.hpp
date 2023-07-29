@@ -22,7 +22,6 @@
 #pragma once
 
 #include "noelle/core/Noelle.hpp"
-
 namespace llvm::noelle {
 
 enum MPAFunctionType {
@@ -41,11 +40,25 @@ MPAFunctionType getCalleeFunctionType(CallBase *callInst);
 
 bool isFixedSizedHeapAllocation(CallBase *heapAllocInst);
 
+/*
+ * Get the size of the allocated memory object in bytes.
+ */
 uint64_t getAllocationSize(Value *allocationSource);
 
+/*
+ * Collected all functions that are called directly or indirectly by caller.
+ * Caller will not be included unless it's called recursively.
+ */
 unordered_set<Function *> functionsInvokedFrom(Noelle &noelle,
                                                Function *caller);
+/*
+ * All functions reachable from @main.
+ */
+unordered_set<Function *> hotFunctions(Noelle &noelle);
 
+/*
+ * Strip pointer casts and GEPs.
+ */
 Value *strip(Value *pointer);
 
 BitVector unite(const BitVector &lhs, const BitVector &rhs);

@@ -20,6 +20,7 @@
  OR OTHER DEALINGS IN THE SOFTWARE.
  */
 #include "Privatizer.hpp"
+
 namespace llvm::noelle {
 
 static cl::opt<bool> DisablePrivatizer("noelle-disable-privatizer",

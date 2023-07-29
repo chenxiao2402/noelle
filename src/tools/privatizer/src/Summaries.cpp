@@ -22,7 +22,6 @@
 #include "Privatizer.hpp"
 #include "Summaries.hpp"
 #include "Utils.hpp"
-#include "llvm/Support/raw_ostream.h"
 
 namespace llvm::noelle {
 
@@ -41,9 +40,9 @@ FunctionSummary::FunctionSummary(Function *currentF, bool printMpaInfo)
   };
 
   /*
-   * (1) Collect alloca/malloc/calloc/free insts in the function.
-   * (2) Collect all pointers in the function.
-   * (3) Collect all pointers may be returned by the function.
+   * 1. Collect store/alloca/malloc/calloc/free insts in the function.
+   * 2. Collect all pointers in the function.
+   * 3. Collect all pointers may be returned by the function.
    */
 
   for (auto &arg : currentF->args()) {
@@ -89,9 +88,7 @@ FunctionSummary::FunctionSummary(Function *currentF, bool printMpaInfo)
             insertPointer(callInst);
             break;
           default:
-            if (callInst->getType()->isPointerTy()) {
-              insertPointer(callInst);
-            }
+            insertPointer(callInst);
             for (auto &arg : callInst->arg_operands()) {
               auto operand = callInst->getArgOperand(arg.getOperandNo());
               insertPointer(operand);
@@ -128,10 +125,7 @@ bool FunctionSummary::mayEscape(GlobalVariable *globalVar) {
 }
 
 bool FunctionSummary::isDestOfMemcpy(Value *v) {
-  assert(mpaFinished);
-  if (ptr2nodeId.find(v) == ptr2nodeId.end()) {
-    return false;
-  }
+  assert(mpaFinished && (ptr2nodeId.find(v) != ptr2nodeId.end()));
   auto nodeId = ptr2nodeId[v];
   return destOfMemcpy.find(nodeId) != destOfMemcpy.end();
 }
@@ -140,7 +134,17 @@ bool FunctionSummary::escaped(NodeID nodeId) {
   auto unknownMemobjId = 0;
   auto escaped = getPointees(unknownMemobjId);
   assert(0 <= nodeId && nodeId < escaped.size());
-  return escaped[nodeId];
+  if (escaped[nodeId]) {
+    return true;
+  }
+  for (auto retPtr : returnPointers) {
+    auto retPtrId = getPtrId(retPtr);
+    auto retMemobjs = getReachableMemobjs(retPtrId);
+    if (retMemobjs.find(nodeId) != retMemobjs.end()) {
+      return true;
+    }
+  }
+  return false;
 }
 
 unordered_set<CallBase *> FunctionSummary::getFreedMemobjs(CallBase *freeInst) {
@@ -160,8 +164,7 @@ unordered_set<CallBase *> FunctionSummary::getFreedMemobjs(CallBase *freeInst) {
   return freedMemObjs;
 }
 
-bool FunctionSummary::stackHasEnoughSpaceForNewAllocaInst(
-    uint64_t allocationSize) {
+bool FunctionSummary::insertNewAllocaInst(uint64_t allocationSize) {
   if ((stackMemoryUsage + allocationSize) < STACK_SIZE_THRESHOLD) {
     stackMemoryUsage += allocationSize;
     return true;
@@ -314,28 +317,26 @@ void FunctionSummary::initPtInfo(void) {
   }
 
   /*
-   * (1) Assign nodeId to each pointer.
-   *     Note the nodeId for the pointer is different from the nodeId for the
+   * 1. Assign nodeId to each pointer.
+   * NOTE: The nodeId for the pointer is different from the nodeId for the
    * memobj. For example, if we have %1 = alloca i32, the nodeId for the
    * allocated memobj may be 1, the nodeId for the pointer %1 may be 4.
    *
-   * (2) Initialize points-to information
-   *     1. The unknown memobj conservatively points to itself since it's a
-   * summary.
-   *     2. Pointers of alloca/malloc/calloc point to the allocated memobj.
-   *     3. Arguments of current function and results of callInsts point to
-   * unknown memobj.
+   * 2. Initialize points-to information
+   * The unknown memobj conservatively points to itself since it's a summary.
+   * Pointers of alloca/malloc/calloc point to the allocated memobj. Arguments
+   * of current function, global variables and returned pointers of callInsts
+   * will point to unknown memobj (allocaCandidate is the only exception).
    *
-   * (3) Add copy edges for pointers.
-   *     If we have %1 = select i1 %cond, i32* %ptr1, i32* %ptr2,
-   *     then we add two copy edges: "%ptr1 -> %1" and "%ptr2 -> %1", where
-   * %ptr1 and %ptr2 are sources of the copy edges, %1 is the destination of the
-   * copy edges. A copy edge from %ptr2 to %1 means that %1 may points to the
-   * same memobjs as %ptr1, to be more specific, pts(%1) = pts(%1) U pts(%ptr2)
+   * 3. Add copy edges for pointers.
+   * Copy edges between pointers can be added through PHINode, SelectInst,
+   * MemcpyInst and realloc(). "unknown" memobj can be have copy edges from
+   * arguments of callInsts, and copy edges to returned pointers of callInsts.
    *
-   * (4) If a pointer is used as the pointer operand of a store/load
-   * instruction, or it is used as an operand of CallInst, record these uses
-   * since they can help the may point-to analysis.
+   * 4. Record uses of pointers.
+   * If a pointer is used as the pointer operand of a store/load instruction,
+   * or it is used as an operand of CallInst, record these uses since they can
+   * help the may point-to analysis to add more copy edges.
    */
   pointsTo[unknownMemobjId] = onlyPointsTo(unknownMemobjId);
 
@@ -429,12 +430,38 @@ void FunctionSummary::solveWorklist(void) {
 void FunctionSummary::handleLoadStore(NodeID ptrId) {
   auto pointees = getPointees(ptrId);
   for (auto memobjId : pointees.set_bits()) {
+    /*
+     * OutgoingLoads helps us to add new copy edges.
+     *
+     * For example, if pointers (%p2) and memobjs (@M1, @M2, @M3, @M4)
+     * form this points-to graph:
+     *
+     * %p2 -> @M2, @M3; @M2 -> @M1; @M3 -> @M4,
+     *
+     * then `%3 = load i32*, i32** %p2` can add copy edges
+     * "@M2 => %3" and "@M3 => %3"
+     *
+     * %3 will point to @M1 and @M4.
+     */
     for (auto loadInst : outgoingLoads[ptrId]) {
       auto destId = getPtrId(loadInst);
       if (addCopyEdge(memobjId, destId)) {
         worklist.push(memobjId);
       }
     }
+    /*
+     * IncomingStores helps us to add new copy edges.
+     *
+     * For example, if pointers (%p1, %p2) and memobjs (@M1, @M2, @M3)
+     * form this points-to graph:
+     *
+     * %p1 -> @M1 ; %p2 -> @M2, @M3
+     *
+     * Then `store i32* %p1, i32** %p2` add copy edges "%p1 => @M2" and
+     * "%p1 => @M3", and the points-to graph can be updated:
+     *
+     * ... ; @M2 -> @M1; @M3 -> @M1
+     */
     for (auto storeInst : incomingStores[ptrId]) {
       auto srcId = getPtrId(storeInst->getValueOperand());
       if (addCopyEdge(srcId, memobjId)) {
@@ -448,6 +475,26 @@ void FunctionSummary::handleFuncUsers(NodeID ptrId) {
   if (usedAsFuncArg.find(ptrId) == usedAsFuncArg.end()) {
     return;
   }
+  /*
+   * If a pointer is used as arg of a callInst, then all memobjds
+   * reachable from this pointer escape. To preserve conservativeness,
+   * "unknown" memobj and all escaped memobj point to each other.
+   *
+   * 1. Add copy edge between "unknown" memobj and all escaped memobjds.
+   * If memobj @M2 escaped and its points-to info updated:
+   *    pts(@M2) = ... U { @M1 },
+   * such an update should be propagated because @M1 escaped too:
+   *    pts("unknown") = ... U { @M1 }.
+   *
+   * 2. Add copy edge between "unknown" memobj and the pointer.
+   * Assume pointer %p1 is used as arg of a callInst `call @g(%p1)`,
+   * and we have a points-to graph:
+   *    %p1 -> @M1, @M2 ; @M1 -> @M3, @M4
+   * Adding copy edges between "unknown" memobj and { @M1, @M2, @M3, @M4 }
+   * is not enough because @M1 and @M2 are not pointed by any escaped memobj.
+   * We need also to add copy edges between "unknown" memobj and %p1 so that
+   * "unkonwn" can point to @M1 and @M2. This case is handle in initPtInfo().
+   */
   NodeID unknownMemobjId = 0;
   for (auto memobjId : getReachableMemobjs(ptrId)) {
     bool changed = false;
@@ -463,6 +510,11 @@ void FunctionSummary::handleCopyEdges(NodeID srcId) {
   if (copyOutEdges.find(srcId) == copyOutEdges.end()) {
     return;
   }
+  /*
+   * Propogate the points-to info of srcId to destId through copy edges.
+   * i.e. pts(destId) = pts(destId) U pts(srcId).
+   * If pts(destId) is changed, add destId to worklist.
+   */
   for (auto &destId : copyOutEdges[srcId]) {
     if (unionPts(srcId, destId)) {
       worklist.push(destId);

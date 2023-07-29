@@ -78,15 +78,14 @@ private:
   unordered_set<Function *> getPrivatizableFunctions(Noelle &noelle,
                                                      GlobalVariable *globalVar);
 
-  Instruction *getProgramPointOfInitilization(
-      Noelle &noelle,
-      GlobalVariable *globalVar,
-      StoreInst *storeInst,
-      unordered_set<Instruction *> &initializers);
+  Instruction *getInitProgramPoint(Noelle &noelle,
+                                   GlobalVariable *globalVar,
+                                   StoreInst *storeInst,
+                                   unordered_set<Instruction *> &initializers);
 
-  bool globalVariableInitializedInFunction(Noelle &noelle,
-                                           GlobalVariable *globalVar,
-                                           Function *currentF);
+  bool initializedBeforeAllUse(Noelle &noelle,
+                               GlobalVariable *globalVar,
+                               Function *currentF);
 };
 
 } // namespace llvm::noelle
