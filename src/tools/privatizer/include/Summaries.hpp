@@ -172,7 +172,7 @@ private:
 
 class UserSummary {
 public:
-  UserSummary(GlobalVariable *globalVar);
+  UserSummary(GlobalVariable *globalVar, Noelle &noelle);
 
   GlobalVariable *globalVar;
   /*

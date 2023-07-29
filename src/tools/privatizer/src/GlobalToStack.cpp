@@ -46,18 +46,8 @@ unordered_set<Function *> Privatizer::getPrivatizableFunctions(
     return functionsInvokedFrom(noelle, caller).count(callee) > 0;
   };
 
-  auto privatizable = [&]() {
-    auto hotFuncs = hotFunctions(noelle);
-    auto userFuncs = UserSummary(globalVar).userFunctions;
-
-    unordered_set<Function *> result;
-    for (auto f : userFuncs) {
-      if (hotFuncs.find(f) != hotFuncs.end()) {
-        result.insert(f);
-      }
-    }
-    return result;
-  }();
+  auto privatizable = UserSummary(globalVar, noelle).userFunctions;
+  assert(!privatizable.empty());
 
   /*
    * If we want to privatize a global variable into an AllocaInst in a function:
@@ -101,8 +91,12 @@ unordered_set<Function *> Privatizer::getPrivatizableFunctions(
       auto funcSum = getFunctionSummary(currentF);
       if (!initializedBeforeAllUse(noelle, globalVar, currentF)) {
         return {};
-      } else if (funcSum->mayEscape(globalVar)
-                 || funcSum->isDestOfMemcpy(globalVar)) {
+      }
+    }
+
+    for (auto currentF : privatizable) {
+      auto funcSum = getFunctionSummary(currentF);
+      if (funcSum->mayEscape(globalVar) || funcSum->isDestOfMemcpy(globalVar)) {
         return {};
       }
     }
@@ -117,7 +111,7 @@ bool Privatizer::initializedBeforeAllUse(Noelle &noelle,
 
   auto funcSum = getFunctionSummary(currentF);
   auto initCandidates = funcSum->storeInsts;
-  auto userInsts = UserSummary(globalVar).userInsts[currentF];
+  auto userInsts = UserSummary(globalVar, noelle).userInsts[currentF];
 
   /*
    * The global variable should be initialized before all use.
@@ -308,7 +302,7 @@ unordered_map<GlobalVariable *, unordered_set<Function *>> Privatizer::
       continue;
     }
 
-    if (UserSummary(&G).userFunctions.empty()) {
+    if (UserSummary(&G, noelle).userFunctions.empty()) {
       errs() << prefix << "Global variable @" << globalVarName
              << " is not used, no need to privatize it.\n";
       continue;
@@ -355,7 +349,7 @@ bool Privatizer::transformG2S(Noelle &noelle,
       return false;
     }
 
-    auto usersToReplace = UserSummary(globalVar).users[currentF];
+    auto usersToReplace = UserSummary(globalVar, noelle).users[currentF];
     assert(!usersToReplace.empty());
 
     unordered_set<Instruction *> instUsers;

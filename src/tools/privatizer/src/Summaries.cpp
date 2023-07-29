@@ -554,7 +554,8 @@ bool FunctionSummary::unionPts(NodeID srcId, NodeID dstId) {
   }
 }
 
-UserSummary::UserSummary(GlobalVariable *globalVar) {
+UserSummary::UserSummary(GlobalVariable *globalVar, Noelle &noelle) {
+  auto hotFuncs = hotFunctions(noelle);
   queue<User *> worklist;
   queue<bool> isDirectUser;
   unordered_map<User *, unordered_set<User *>> inst2op;
@@ -572,13 +573,15 @@ UserSummary::UserSummary(GlobalVariable *globalVar) {
     if (isa<Instruction>(user)) {
       auto inst = dyn_cast<Instruction>(user);
       auto f = inst->getFunction();
-      if (direct) {
-        userInsts[f].insert(inst);
-        users[f].insert(inst);
-      } else {
-        userInsts[f].insert(inst);
-        for (auto op : inst2op[inst]) {
-          users[f].insert(op);
+      if (hotFuncs.find(f) != hotFuncs.end()) {
+        if (direct) {
+          userInsts[f].insert(inst);
+          users[f].insert(inst);
+        } else {
+          userInsts[f].insert(inst);
+          for (auto op : inst2op[inst]) {
+            users[f].insert(op);
+          }
         }
       }
     } else if (isa<Operator>(user)) {
