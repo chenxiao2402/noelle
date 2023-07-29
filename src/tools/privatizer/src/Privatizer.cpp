@@ -43,7 +43,7 @@ bool Privatizer::runOnModule(Module &M) {
    * Fetch NOELLE.
    */
   auto &noelle = getAnalysis<Noelle>();
-  verbose = noelle.getVerbosity() > Verbosity::Maximal;
+  verbose = noelle.getVerbosity() >= Verbosity::Maximal;
 
   auto modified = false;
   modified |= applyG2S(noelle);

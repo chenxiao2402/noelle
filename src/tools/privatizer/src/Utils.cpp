@@ -21,6 +21,7 @@
  */
 #include "Privatizer.hpp"
 #include "Utils.hpp"
+
 namespace llvm::noelle {
 
 MPAFunctionType getCalleeFunctionType(CallBase *callInst) {
@@ -161,15 +162,18 @@ unordered_set<Function *> hotFunctions(Noelle &noelle) {
 
 Value *strip(Value *pointer) {
   assert(pointer != nullptr || pointer->getType()->isPointerTy());
-  auto stripped = pointer->stripPointerCasts();
+
   if (isa<GetElementPtrInst>(pointer)) {
     auto gepInst = dyn_cast<GetElementPtrInst>(pointer);
-    stripped = gepInst->getPointerOperand();
+    return strip(gepInst->getPointerOperand());
   } else if (isa<GEPOperator>(pointer)) {
     auto gepOp = dyn_cast<GEPOperator>(pointer);
-    stripped = gepOp->getPointerOperand();
+    return strip(gepOp->getPointerOperand());
+  } else if (isa<BitCastInst>(pointer) || isa<BitCastOperator>(pointer)) {
+    return strip(pointer->stripPointerCasts());
+  } else {
+    return pointer;
   }
-  return stripped;
 }
 
 BitVector unite(const BitVector &lhs, const BitVector &rhs) {

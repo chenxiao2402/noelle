@@ -284,6 +284,20 @@ void FunctionSummary::mayPointsToAnalysis(void) {
       }
       errs() << "\n";
     }
+
+    errs() << "Incoming stores:\n";
+    for (auto &[ptrId, stores] : incomingStores) {
+      for (auto store : stores) {
+        errs() << "\t" << ptrId << " => " << *store << "\n";
+      }
+    }
+
+    errs() << "Outgoing loads:\n";
+    for (auto &[ptrId, loads] : outgoingLoads) {
+      for (auto load : loads) {
+        errs() << "\t" << ptrId << " => " << *load << "\n";
+      }
+    }
   }
 }
 
@@ -375,6 +389,8 @@ void FunctionSummary::initPtInfo(void) {
         default:
           break;
       }
+    } else if (isa<ConstantPointerNull>(ptr)) {
+      pointsTo[ptrId] = getEmptyBitVector();
     }
 
     for (auto user : ptr->users()) {
@@ -443,12 +459,15 @@ void FunctionSummary::handleLoadStore(NodeID ptrId) {
      *
      * %3 will point to @M1 and @M4.
      */
-    for (auto loadInst : outgoingLoads[ptrId]) {
-      auto destId = getPtrId(loadInst);
-      if (addCopyEdge(memobjId, destId)) {
-        worklist.push(memobjId);
+    if (outgoingLoads.find(ptrId) != outgoingLoads.end()) {
+      for (auto loadInst : outgoingLoads[ptrId]) {
+        auto destId = getPtrId(loadInst);
+        if (addCopyEdge(memobjId, destId)) {
+          worklist.push(memobjId);
+        }
       }
     }
+
     /*
      * IncomingStores helps us to add new copy edges.
      *
@@ -462,10 +481,12 @@ void FunctionSummary::handleLoadStore(NodeID ptrId) {
      *
      * ... ; @M2 -> @M1; @M3 -> @M1
      */
-    for (auto storeInst : incomingStores[ptrId]) {
-      auto srcId = getPtrId(storeInst->getValueOperand());
-      if (addCopyEdge(srcId, memobjId)) {
-        worklist.push(srcId);
+    if (incomingStores.find(ptrId) != incomingStores.end()) {
+      for (auto storeInst : incomingStores[ptrId]) {
+        auto srcId = getPtrId(storeInst->getValueOperand());
+        if (addCopyEdge(srcId, memobjId)) {
+          worklist.push(srcId);
+        }
       }
     }
   }
@@ -525,8 +546,12 @@ void FunctionSummary::handleCopyEdges(NodeID srcId) {
 bool FunctionSummary::unionPts(NodeID srcId, NodeID dstId) {
   BitVector oldPts = pointsTo[dstId];
   BitVector newPts = unite(oldPts, pointsTo[srcId]);
-  pointsTo[dstId] = newPts;
-  return oldPts != newPts;
+  if (oldPts == newPts) {
+    return false;
+  } else {
+    pointsTo[dstId] = newPts;
+    return true;
+  }
 }
 
 UserSummary::UserSummary(GlobalVariable *globalVar) {
