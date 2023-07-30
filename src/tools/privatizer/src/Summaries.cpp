@@ -307,7 +307,13 @@ void FunctionSummary::initPtInfo(void) {
   nextNodeId = 0;
   ptr2nodeId.clear();
   nodeId2memobj.clear();
+  memobj2nodeId.clear();
   pointsTo.clear();
+  copyOutEdges.clear();
+  incomingStores.clear();
+  outgoingLoads.clear();
+  usedAsFuncArg.clear();
+  destOfMemcpy.clear();
 
   auto allocations = getAllocations();
 
