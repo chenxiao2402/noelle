@@ -52,7 +52,7 @@ LiveMemorySummary Privatizer::getLiveMemorySummary(Noelle &noelle,
 
   /*
    * 1. Only fixed size @malloc(), such as %1 = tail call i8* @malloc(i64 8),
-   * can be transformed to allocaInst. Otherwise, it may cause stack overflow.
+   *    can be transformed to allocaInst.
    * 2. @malloc() insts in loops can't be transformed to allocaInst becuase it
    *    will be executed multiple times.
    * 3. @malloc() insts that may escape can't be transformed to allocaInst.
@@ -79,22 +79,21 @@ LiveMemorySummary Privatizer::getLiveMemorySummary(Noelle &noelle,
    *   %1 = tail call i8* @malloc(i64 8)
    *   %2 = tail call i8* @malloc(i64 8)
    *   %3 = tail call i8* @malloc(i64 8)
-   *   call free(%4);
-   *   call free(%5);
+   *   call @free(%4);
+   *   call @free(%5);
    * where %1, %2 are allocable; while %3 is not.
    * %4 may free memory object allocated by %1, %2.
    * %5 may free memory object allocated by %2, %3.
    *
    * It turns out we can't optimize anything.
    * Since %3 is not an allocable, we can't remove @free(%5).
-   * This means %2 should not be transformed to allocaInst either.
+   * This means %2 should not be transformed to allocaInst as well.
    * Since %2 can't be transformed to allocaInst, we can't remove @free(%4).
    * This means %1 also shouldn't be transformed to allocaInst.
    *
-   * Therefore, if the memory object allocated by an allocable
-   * can be freed by a @free() inst that may also free memory objects
-   * allocated by a non-allocable, the allocable is not
-   * an allocable anymore.
+   * Therefore, if the memory object allocated by an allocable can be
+   * freed by a @free() inst that may also free memory objects allocated
+   * by a non-allocable, the allocable is not an allocable anymore.
    */
   bool fixedPoint = false;
   while (!fixedPoint) {
@@ -155,12 +154,12 @@ unordered_map<Function *, LiveMemorySummary> Privatizer::collectH2S(
 
   for (auto f : heapAllocUsers) {
     auto fname = f->getName();
-    auto suffix = " in function " + fname + "\n";
+    auto suffix = "in function " + fname + "\n";
     auto funcSum = getFunctionSummary(f);
     auto memSum = getLiveMemorySummary(noelle, f);
 
     if (memSum.allocable.empty()) {
-      errs() << prefix << "@malloc or @calloc not allocable" << suffix;
+      errs() << prefix << "@malloc or @calloc not allocable " << suffix;
       continue;
     }
 
@@ -177,18 +176,18 @@ bool Privatizer::transformH2S(Noelle &noelle, LiveMemorySummary liveMemSum) {
     auto allocationSize = getAllocationSize(heapAllocInst);
     auto currentF = heapAllocInst->getParent()->getParent();
     auto funcSum = getFunctionSummary(currentF);
-    auto suffix = " in function " + currentF->getName() + "\n";
+    auto suffix = "in function " + currentF->getName() + "\n";
 
     /*
-     * Check if the stack of current function can hold the memory object.
-     * If @malloc() allocates an memobj too large for the stack, it should
-     * not be transformed to allocaInst.
+     * Check if the stack of current function can hold the memory object of
+     * the @malloc(). If @malloc() allocates an memobj too large for the stack,
+     * it should not be transformed to allocaInst.
      */
-    if (!funcSum->insertNewAllocaInst(allocationSize)) {
+    if (!funcSum->stackCanHoldNewAlloca(allocationSize)) {
       errs()
           << prefix
           << "Stack memory usage exceeds the limit, can't transfrom to allocaInst: "
-          << *heapAllocInst << suffix;
+          << *heapAllocInst << " " << suffix;
       continue;
     }
 
@@ -196,38 +195,38 @@ bool Privatizer::transformH2S(Noelle &noelle, LiveMemorySummary liveMemSum) {
     auto entryBlock = &currentF->getEntryBlock();
     auto firstInst = entryBlock->getFirstNonPHI();
     IRBuilder<> entryBuilder(firstInst);
-    IRBuilder<> allocBuilder(heapAllocInst);
 
     LLVMContext &context = noelle.getProgramContext();
     Type *oneByteType = Type::getInt8Ty(context);
     ConstantInt *arraySize =
         ConstantInt::get(Type::getInt64Ty(context), allocationSize);
 
-    auto calleeFunc = heapAllocInst->getCalledFunction();
-    auto calleeName = calleeFunc ? calleeFunc->getName() : "";
+    auto calleeType = getCalleeFunctionType(heapAllocInst);
 
-    if (calleeName == "malloc") {
+    if (calleeType == MALLOC) {
       AllocaInst *allocaInst =
           entryBuilder.CreateAlloca(oneByteType, arraySize, "");
 
       errs() << prefix << "Replace @malloc: " << *heapAllocInst << "\n";
       errs() << emptyPrefix << "with allocaInst: " << *allocaInst << "\n";
+      errs() << emptyPrefix << suffix;
 
       heapAllocInst->replaceAllUsesWith(allocaInst);
       heapAllocInst->eraseFromParent();
 
-    } else if (calleeName == "calloc") {
+    } else if (calleeType == CALLOC) {
       ConstantInt *zeroVal = ConstantInt::get(Type::getInt8Ty(context), 0);
 
       AllocaInst *allocaInst =
           entryBuilder.CreateAlloca(oneByteType, arraySize, "");
 
       CallInst *memSetInst =
-          allocBuilder.CreateMemSet(allocaInst, zeroVal, arraySize, 1);
+          entryBuilder.CreateMemSet(allocaInst, zeroVal, arraySize, 1);
 
       errs() << prefix << "Replace @malloc: " << *heapAllocInst << "\n";
       errs() << emptyPrefix << "with allocaInst: " << *allocaInst << "\n";
       errs() << emptyPrefix << "and memset Inst: " << *memSetInst << "\n";
+      errs() << emptyPrefix << suffix;
 
       heapAllocInst->replaceAllUsesWith(allocaInst);
       heapAllocInst->eraseFromParent();

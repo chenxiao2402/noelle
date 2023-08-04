@@ -30,7 +30,9 @@ class Privatizer : public ModulePass {
 public:
   static char ID;
 
-  // Privatizer.cpp
+  /*
+   * Privatizer.cpp
+   */
   Privatizer();
 
   bool doInitialization(Module &M) override;
@@ -54,9 +56,11 @@ private:
 
   FunctionSummary *getFunctionSummary(Function *f);
 
-  void clearFunctionSummaries();
+  void clearFunctionSummaries(void);
 
-  // HeapToStack.cpp
+  /*
+   * HeapToStack.cpp
+   */
   bool applyH2S(Noelle &noelle);
 
   unordered_map<Function *, LiveMemorySummary> collectH2S(Noelle &noelle);
@@ -65,7 +69,9 @@ private:
 
   LiveMemorySummary getLiveMemorySummary(Noelle &noelle, Function *f);
 
-  // GlobalToStack.cpp
+  /*
+   * GlobalToStack.cpp
+   */
   bool applyG2S(Noelle &noelle);
 
   unordered_map<GlobalVariable *, unordered_set<Function *>> collectG2S(

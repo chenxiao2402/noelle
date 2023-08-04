@@ -36,7 +36,6 @@ bool Privatizer::runOnModule(Module &M) {
   if (!this->enablePrivatizer) {
     return false;
   }
-  auto prefix = "Privatizer: ";
   errs() << prefix << "Start\n";
 
   /*

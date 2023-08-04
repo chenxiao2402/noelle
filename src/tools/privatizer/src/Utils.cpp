@@ -88,7 +88,16 @@ bool isFixedSizedHeapAllocation(CallBase *heapAllocInst) {
 }
 
 uint64_t getAllocationSize(Value *allocationSource) {
-  if (isa<CallBase>(allocationSource)) {
+  if (isa<AllocaInst>(allocationSource)) {
+    auto allocaInst = dyn_cast<AllocaInst>(allocationSource);
+    auto dl = allocaInst->getModule()->getDataLayout();
+    return allocaInst->getAllocationSizeInBits(dl).getValue() / 8;
+  } else if (isa<GlobalVariable>(allocationSource)) {
+    auto globalVar = dyn_cast<GlobalVariable>(allocationSource);
+    auto globalVarType = globalVar->getValueType();
+    auto dl = globalVar->getParent()->getDataLayout();
+    return dl.getTypeAllocSize(globalVarType);
+  } else if (isa<CallBase>(allocationSource)) {
     auto heapAllocInst = dyn_cast<CallBase>(allocationSource);
     if (isFixedSizedHeapAllocation(heapAllocInst)) {
       auto dl = heapAllocInst->getModule()->getDataLayout();
@@ -104,15 +113,8 @@ uint64_t getAllocationSize(Value *allocationSource) {
         return elementCount * elementSizeInBytes;
       }
     }
-  } else if (isa<GlobalVariable>(allocationSource)) {
-    auto globalVar = dyn_cast<GlobalVariable>(allocationSource);
-    auto globalVarType = globalVar->getValueType();
-    auto dl = globalVar->getParent()->getDataLayout();
-    return dl.getTypeAllocSize(globalVarType);
   }
-  assert(
-      false
-      && "Unsupported allocation source: not a fixed-sized heap allocation or a global variable.");
+  assert(false && "Unsupported allocation source.");
 };
 
 unordered_set<Function *> functionsInvokedFrom(Noelle &noelle,
@@ -123,7 +125,7 @@ unordered_set<Function *> functionsInvokedFrom(Noelle &noelle,
   auto pcf = fm->getProgramCallGraph();
 
   auto insertMyCallees = [&](Function *caller,
-                             queue<Function *> &funcToTraverse) {
+                             queue<Function *> &funcsToTraverse) {
     auto funcNode = pcf->getFunctionNode(caller);
     for (auto callEdge : funcNode->getOutgoingEdges()) {
       for (auto subEdge : callEdge->getSubEdges()) {
@@ -131,23 +133,23 @@ unordered_set<Function *> functionsInvokedFrom(Noelle &noelle,
         if (!calleeFunc || calleeFunc->empty()) {
           continue;
         }
-        funcToTraverse.push(calleeFunc);
+        funcsToTraverse.push(calleeFunc);
       }
     }
   };
 
   unordered_set<Function *> funcSet;
-  queue<Function *> funcToTraverse;
-  insertMyCallees(caller, funcToTraverse);
+  queue<Function *> funcsToTraverse;
+  insertMyCallees(caller, funcsToTraverse);
 
-  while (!funcToTraverse.empty()) {
-    auto func = funcToTraverse.front();
-    funcToTraverse.pop();
+  while (!funcsToTraverse.empty()) {
+    auto func = funcsToTraverse.front();
+    funcsToTraverse.pop();
     if (funcSet.find(func) != funcSet.end()) {
       continue;
     }
     funcSet.insert(func);
-    insertMyCallees(func, funcToTraverse);
+    insertMyCallees(func, funcsToTraverse);
   }
 
   return funcSet;

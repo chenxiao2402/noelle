@@ -37,7 +37,6 @@ unordered_set<Function *> Privatizer::getPrivatizableFunctions(
     Noelle &noelle,
     GlobalVariable *globalVar) {
 
-  auto globalVarName = globalVar->getName();
   if (globalVar->isConstant()) {
     return {};
   }
@@ -50,20 +49,29 @@ unordered_set<Function *> Privatizer::getPrivatizableFunctions(
   assert(!privatizable.empty());
 
   /*
-   * If we want to privatize a global variable into an AllocaInst in a function:
+   * Each function that uses the global variable may read or write the global
+   * variable. Therefore, the design choice is to check whether each user
+   * funciton will never read data written by another user function.
    *
-   * 1. Pretend the global variable to be an allocaInst, if it doesn't escape,
-   *    then the global variable could be privatized without core dump.
-   * 2. The global variable should be initialized before any use.
-   * 3. The global variable should not be used by my callee.
+   * If so, we could privatize the global variable to all user functions
+   * separately. If not, then we do nothing.
    *
-   * The first condition tells us it's safe to privatize the global variable.
-   * The second and third condition ensure the global variable is only modified
-   * by current function.
+   * To check each user function will never read data written by another one,
+   * each user function must satisfy three conditions:
    *
-   * We check all functions that use the global variable and privatize the
-   * global variable to all of them if they all satisfy the above conditions.
-   * Otherwise, the global variable can't be privatized to any function.
+   * 1. The global variable should be initialized before any use.
+   * 2. The global variable should not be used by my callee.
+   * 3. The global variable should not be pointed by other global variables,
+   *    arguments of the current func, and return values of the current func.
+   *
+   * The first condition says the current function will not read data written
+   * by functions invoked before the current function.
+   *
+   * The second condition says other functions will not directly write data
+   * to the global variable during the current function.
+   *
+   * The third condition says the global variable will not be written through
+   * pointers during the current function.
    */
   if (privatizable.size() == 1) {
     auto currentF = *privatizable.begin();
@@ -73,7 +81,7 @@ unordered_set<Function *> Privatizer::getPrivatizableFunctions(
       return {};
     } else if (!initializedBeforeAllUse(noelle, globalVar, currentF)) {
       return {};
-    } else if (funcSum->mayEscape(globalVar)
+    } else if (funcSum->notPrivatizable(globalVar)
                || funcSum->isDestOfMemcpy(globalVar)) {
       return {};
     }
@@ -96,7 +104,8 @@ unordered_set<Function *> Privatizer::getPrivatizableFunctions(
 
     for (auto currentF : privatizable) {
       auto funcSum = getFunctionSummary(currentF);
-      if (funcSum->mayEscape(globalVar) || funcSum->isDestOfMemcpy(globalVar)) {
+      if (funcSum->notPrivatizable(globalVar)
+          || funcSum->isDestOfMemcpy(globalVar)) {
         return {};
       }
     }
@@ -116,9 +125,9 @@ bool Privatizer::initializedBeforeAllUse(Noelle &noelle,
   /*
    * The global variable should be initialized before all use.
    *
-   * We try to find find a store instruction that will overwrite the
-   * whole memory object of the global variable, initializers refer to
-   * the instructions that will initialize the global variable.
+   * We try to find find a store instruction that will write the whole
+   * memory object of the global variable, initializers refer to the
+   * instructions that will initialize the global variable.
    *
    * Each user of the global variable should either be part of initializers,
    * or be dominated by the initialization. Otherwise, the global variable
@@ -205,7 +214,7 @@ Instruction *Privatizer::getInitProgramPoint(
      *
      * However, if the global variable is array type, then it should be
      * initialized in a loop. Here we try to check that the loop traverses
-     * each element of the global array and rewrite the element.
+     * each element of the global array and writes the element.
      *
      * The first instruction of the exitnode of the loop is the program
      * point where the global variable is initialized.
@@ -338,11 +347,11 @@ bool Privatizer::transformG2S(Noelle &noelle,
     auto globalVarName = globalVar->getName();
 
     /*
-     * Check if the stack of current function can hold the memory object.
-     * If global variable is too large for the stack, it should not be
-     * transformed to allocaInst.
+     * Check if the stack of current function can hold the memory object of
+     * the global variable. If the global variable is too large for the stack,
+     * it should not be privatized to allocaInst.
      */
-    if (!funcSum->insertNewAllocaInst(allocationSize)) {
+    if (!funcSum->stackCanHoldNewAlloca(allocationSize)) {
       errs()
           << prefix << "Stack memory usage exceeds the limit, can't privatize "
           << "global variable @" << globalVarName << suffix;
@@ -383,7 +392,7 @@ bool Privatizer::transformG2S(Noelle &noelle,
 
   for (auto currentF : privatizable) {
     auto funcSum = getFunctionSummary(currentF);
-    auto suffix = " in function " + currentF->getName() + "\n";
+    auto suffix = "in function " + currentF->getName() + "\n";
     auto globalVarName = globalVar->getName();
 
     modified = true;
@@ -396,8 +405,7 @@ bool Privatizer::transformG2S(Noelle &noelle,
 
     /*
      * Replace all uses of the global variable in the entry function with an
-     * allocaInst. The allocaInst is placed at the beginning of
-     * the entry block.
+     * allocaInst. The allocaInst is placed at the beginning of the entry block.
      */
     for (auto inst : directUses[currentF]) {
       inst->replaceUsesOfWith(globalVar, allocaInst);
@@ -412,6 +420,7 @@ bool Privatizer::transformG2S(Noelle &noelle,
 
     errs() << prefix << "Replace global variable @" << globalVarName << "\n";
     errs() << emptyPrefix << "with allocaInst: " << *allocaInst << "\n";
+    errs() << emptyPrefix << suffix;
   }
 
   return modified;

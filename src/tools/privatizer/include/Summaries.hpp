@@ -46,20 +46,17 @@ public:
   unordered_set<CallBase *> freeInsts;
 
   bool mayEscape(CallBase *heapAllocInst);
-  bool mayEscape(GlobalVariable *globalVar);
+  bool notPrivatizable(GlobalVariable *globalVar);
   bool isDestOfMemcpy(Value *v);
 
   unordered_set<CallBase *> getFreedMemobjs(CallBase *freeInst);
 
-  bool insertNewAllocaInst(uint64_t allocationSize);
+  bool stackCanHoldNewAlloca(uint64_t allocationSize);
 
 private:
   bool printMpaInfo = false;
   const uint64_t STACK_SIZE_THRESHOLD = 8 * 1024 * 1024;
   uint64_t stackMemoryUsage = 0;
-
-  bool mpaFinished = false;
-  NodeID nextNodeId = 0;
 
   /*
    * All pointers may be used as return value of current function.
@@ -70,6 +67,9 @@ private:
    */
   unordered_set<Value *> pointers;
 
+  bool mpaFinished = false;
+  NodeID nextNodeId = 0;
+
   /*
    * Assign node id to each pointer in current function.
    */
@@ -79,9 +79,9 @@ private:
    * Assign node id to each memory object, the memory object is represented
    * by the souce of allocation.
    *
-   * 1) The allocation source can be a AllocaInst, a malloc/calloc call,
+   * 1. The allocation source can be a AllocaInst, a malloc/calloc call,
    *    or allocaCandidate.
-   * 2) Besides, we have a "unknown" memobj, which always has node id 0 and
+   * 2. Besides, we have a "unknown" memobj, which always has node id 0 and
    *    its allocation souce is nullptr, which is a summary of all memobjs not
    *    allocated by current function.
    *
@@ -111,7 +111,7 @@ private:
   /*
    * storeInst = `store i32* %p1, i32** %p2` is an incomingStore of %p2
    * since %p2 is used as the pointer operand of storeInst, and the points-to
-   * info flows from %p1 to the memory objects pointed by %p2.
+   * info flows from %p1 into the memory objects pointed by %p2.
    */
   unordered_map<NodeID, unordered_set<StoreInst *>> incomingStores;
 
@@ -123,27 +123,31 @@ private:
   unordered_map<NodeID, unordered_set<LoadInst *>> outgoingLoads;
 
   /*
-   * All pointers used as arguments of call sites in current function.
+   * All pointers used as arguments of callInsts in current function.
    */
   unordered_set<NodeID> usedAsFuncArg;
 
   /*
-   * Because of the issue of -instCombine pass, an allocaInst will be
-   * incorrectly removed if it's the dest of memcpy calls. So we track all dests
-   * of memcpy calls and they should not be transformed to allocaInsts.
+   * Because of the issue of -instCombine pass, memcpy will be incorrectly
+   * removed if its dest is an alloca. So we track all dests of memcpys and
+   * they should not be transformed to allocaInsts.
    */
-  unordered_set<NodeID> destOfMemcpy;
+  unordered_set<NodeID> destsOfMemcpy;
 
   /*
    * allocaCandidate is a global variable that we want to privatize into
    * current function, i.e. it works like an allocaInst in current function.
    *
-   * Usually, global variables point to "unknown" memobj (see comments below),
-   * but allocaCandidate is an exception. We assign a node id for the memobj
-   * of allocaCandidate, which is different from all other memobjs from
-   * alloca/malloc/calloc and "unkonwn" memobj.
+   * Usually, global variables point to "unknown" memobj, but allocaCandidate
+   * is an exception. We assign a node id for the memobj of allocaCandidate,
+   * which is different from all other memobjs from alloca/malloc/calloc and
+   * "unkonwn" memobj.
    *
-   * Check GlobalToStack.cpp for the reason to introduce allocaCandidate.
+   * The reason to introduce allocaCandidate is to check the memory object of
+   * the global variable will not be pointed by other global variables,
+   * arguments of the current function, and the return values of the current
+   * function. i.e. allocaCandidate and notPrivatizable() help check the third
+   * condition from Privatizer::getPrivatizableFunctions().
    */
   GlobalVariable *allocaCandidate = nullptr;
 
@@ -167,7 +171,7 @@ private:
   unordered_set<NodeID> getReachableMemobjs(NodeID ptrId);
   bool unionPts(NodeID srcId, NodeID dstId);
 
-  bool escaped(NodeID nodeId);
+  bool mayBePointedByUnknown(NodeID nodeId);
 };
 
 class UserSummary {

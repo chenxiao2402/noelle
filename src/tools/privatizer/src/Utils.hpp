@@ -47,7 +47,7 @@ uint64_t getAllocationSize(Value *allocationSource);
 
 /*
  * Collected all functions that are called directly or indirectly by caller.
- * Caller will not be included unless it's called recursively.
+ * Caller itself will not be included unless it's called recursively.
  */
 unordered_set<Function *> functionsInvokedFrom(Noelle &noelle,
                                                Function *caller);
