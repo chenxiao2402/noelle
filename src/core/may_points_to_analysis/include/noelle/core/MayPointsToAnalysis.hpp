@@ -25,7 +25,7 @@
 
 namespace llvm::noelle {
 
-typedef uint64_t NodeID;
+typedef uint32_t NodeID;
 
 class MpaSummary {
 public:
@@ -39,8 +39,13 @@ public:
   std::unordered_set<CallBase *> callocInsts;
   std::unordered_set<CallBase *> freeInsts;
 
-  bool mayBePointedByUnknown(Value *ptr);
+  bool mayBePointedByUnknown(Value *memobj);
+  bool mayBePointedByReturnValue(Value *memobj);
   std::unordered_set<Value *> getPointees(Value *ptr);
+
+  void doMayPointsToAnalysis(void);
+  void doMayPointsToAnalysisFor(GlobalVariable *globalVar);
+  void clearPointsToSummary(void);
 
 private:
   /*
@@ -138,7 +143,6 @@ private:
   NodeID getPtrId(Value *v);
   bool addCopyEdge(NodeID src, NodeID dst);
 
-  void mayPointsToAnalysis(void);
   void initPtInfo(void);
   void solveWorklist(void);
 
@@ -158,6 +162,7 @@ public:
   bool mayAlias(Value *ptr1, Value *ptr2);
   bool mayEscape(Instruction *inst);
   bool notPrivatizable(GlobalVariable *globalVar, Function *currentF);
+  bool mayAccessEscapedMemobj(Instruction *inst);
 
   ~MayPointsToAnalysis();
 

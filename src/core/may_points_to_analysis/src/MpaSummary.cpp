@@ -104,54 +104,48 @@ MpaSummary::MpaSummary(Function *currentF) : currentF(currentF) {
 
 unordered_set<Value *> MpaSummary::getPointees(Value *ptr) {
   assert(mpaFinished);
-  assert(ptr2nodeId.find(ptr) != ptr2nodeId.end());
-  auto ptrId = ptr2nodeId[ptr];
+
+  auto stripped = strip(ptr);
+  assert(ptr2nodeId.find(stripped) != ptr2nodeId.end());
+
+  auto ptrId = ptr2nodeId[stripped];
   unordered_set<Value *> pointees;
+
   for (auto memobjId : getPointees(ptrId).set_bits()) {
     if (memobjId == UnknownMemobjId) {
       pointees.insert(nullptr);
     } else {
-      pointees.insert(nodeId2memobj.at(memobjId));
+      pointees.insert(nodeId2memobj[memobjId]);
     }
   }
   return pointees;
 }
 
-bool MpaSummary::mayBePointedByUnknown(Value *ptr) {
+bool MpaSummary::mayBePointedByUnknown(Value *memobj) {
   assert(mpaFinished);
+  assert(isAllocation(memobj));
+  auto memobjId = memobj2nodeId.at(memobj);
 
-  auto pointedByUnknown = [this](NodeID nodeId) -> bool {
-    auto unknownPts = this->getReachableMemobjs(this->UnknownMemobjId);
-    if (unknownPts.find(nodeId) != unknownPts.end()) {
+  auto unknownPts = getReachableMemobjs(UnknownMemobjId);
+  if (unknownPts.find(memobjId) != unknownPts.end()) {
+    return true;
+  }
+  return false;
+}
+
+bool MpaSummary::mayBePointedByReturnValue(Value *memobj) {
+  assert(mpaFinished);
+  assert(isAllocation(memobj));
+  auto memobjId = memobj2nodeId.at(memobj);
+
+  for (auto retPtr : returnPointers) {
+    auto retPtrId = getPtrId(retPtr);
+    auto retMemobjs = getReachableMemobjs(retPtrId);
+    if (retMemobjs.find(memobjId) != retMemobjs.end()) {
       return true;
     }
-    for (auto retPtr : this->returnPointers) {
-      auto retPtrId = getPtrId(retPtr);
-      auto retMemobjs = getReachableMemobjs(retPtrId);
-      if (retMemobjs.find(nodeId) != retMemobjs.end()) {
-        return true;
-      }
-    }
-    return false;
-  };
-
-  if (ptr && isa<GlobalVariable>(ptr)) {
-    auto globalVar = dyn_cast<GlobalVariable>(ptr);
-    allocaCandidate = globalVar;
-    mayPointsToAnalysis();
-    auto memObjId = memobj2nodeId[globalVar];
-    return pointedByUnknown(memObjId);
-  } else if (ptr && getAllocations().count(ptr) > 0) {
-    if (!mpaFinished) {
-      allocaCandidate = nullptr;
-      mayPointsToAnalysis();
-    }
-    auto inst = dyn_cast<Instruction>(ptr);
-    auto memObjId = memobj2nodeId[inst];
-    return pointedByUnknown(memObjId);
-  } else {
-    assert(false && "Not a valid allocation of memory object.");
   }
+  return false;
 }
 
 BitVector MpaSummary::getPointees(NodeID nodeId) {
@@ -222,14 +216,20 @@ bool MpaSummary::addCopyEdge(NodeID src, NodeID dst) {
   return copyOutEdges[src].insert(dst).second;
 }
 
-void MpaSummary::mayPointsToAnalysis(void) {
-  initPtInfo();
-  solveWorklist();
-  mpaFinished = true;
+void MpaSummary::doMayPointsToAnalysis(void) {
+  if (!mpaFinished) {
+    initPtInfo();
+    solveWorklist();
+    mpaFinished = true;
+  }
 }
 
-void MpaSummary::initPtInfo(void) {
+void MpaSummary::doMayPointsToAnalysisFor(GlobalVariable *globalVar) {
+  allocaCandidate = globalVar;
+  doMayPointsToAnalysis();
+}
 
+void MpaSummary::clearPointsToSummary(void) {
   mpaFinished = false;
   nextNodeId = 1;
   ptr2nodeId.clear();
@@ -240,6 +240,11 @@ void MpaSummary::initPtInfo(void) {
   incomingStores.clear();
   outgoingLoads.clear();
   usedAsFuncArg.clear();
+}
+
+void MpaSummary::initPtInfo(void) {
+
+  clearPointsToSummary();
 
   auto allocations = getAllocations();
 

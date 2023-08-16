@@ -95,4 +95,29 @@ BitVector unite(const BitVector &lhs, const BitVector &rhs) {
   return result;
 }
 
+unordered_set<Value *> intersect(const unordered_set<Value *> &lhs,
+                                 const unordered_set<Value *> &rhs) {
+  unordered_set<Value *> lhsOnly(lhs);
+  lhsOnly.erase(rhs.begin(), rhs.end());
+  unordered_set<Value *> result(lhs);
+  result.erase(lhsOnly.begin(), lhsOnly.end());
+  return result;
+}
+
+bool isAllocation(Value *allocation) {
+  if (isa<AllocaInst>(allocation) || isa<GlobalVariable>(allocation)) {
+    return true;
+  }
+
+  if (isa<CallBase>(allocation)) {
+    auto callInst = dyn_cast<CallBase>(allocation);
+    auto calleeType = getCalleeFunctionType(callInst);
+    if (calleeType == MALLOC || calleeType == CALLOC) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 } // namespace llvm::noelle
