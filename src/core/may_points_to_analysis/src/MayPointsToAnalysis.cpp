@@ -116,6 +116,14 @@ bool MayPointsToAnalysis::mayAccessEscapedMemobj(Instruction *inst) {
   return false;
 }
 
+std::unordered_set<Value *> MayPointsToAnalysis::getPointees(
+    Value *ptr,
+    Function *currentF) {
+  assert(ptr->getType()->isPointerTy());
+  auto funcSum = getFunctionSummary(currentF);
+  return funcSum->getPointees(ptr);
+}
+
 MayPointsToAnalysis::~MayPointsToAnalysis() {
   for (auto &[f, funcSum] : functionSummaries) {
     delete funcSum;

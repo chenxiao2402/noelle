@@ -163,6 +163,7 @@ public:
   bool mayEscape(Instruction *inst);
   bool notPrivatizable(GlobalVariable *globalVar, Function *currentF);
   bool mayAccessEscapedMemobj(Instruction *inst);
+  std::unordered_set<Value *> getPointees(Value *ptr, Function *currentF);
 
   ~MayPointsToAnalysis();
 
