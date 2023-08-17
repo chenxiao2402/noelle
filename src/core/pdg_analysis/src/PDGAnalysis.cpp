@@ -364,6 +364,10 @@ bool PDGAnalysis::mayAccessSameMemoryObject(Value *i0, Value *i1) {
     return true;
   }
 
+  if (i0 == i1) {
+    return true;
+  }
+
   if (!isa<CallBase>(i0) && !isa<CallBase>(i1)) {
     auto ptr0 = getPointer(i0);
     auto ptr1 = getPointer(i1);
@@ -386,7 +390,7 @@ bool PDGAnalysis::canMemoryEdgeBeRemoved(PDG *pdg, DGEdge<Value> *edge) {
   auto i0 = edge->getOutgoingT();
   auto i1 = edge->getIncomingT();
 
-  return mayAccessSameMemoryObject(i0, i1);
+  return !mayAccessSameMemoryObject(i0, i1);
 }
 
 // NOTE: Loads between random parts of separate GVs and both edges between GVs
