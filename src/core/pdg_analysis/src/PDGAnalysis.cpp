@@ -384,11 +384,36 @@ bool PDGAnalysis::canMemoryEdgeBeRemoved(PDG *pdg, DGEdge<Value> *edge) {
   assert(pdg != nullptr);
   assert(edge != nullptr);
 
+  auto isCallToPrint = [](Value *i) -> bool {
+    if (!isa<CallBase>(i)) {
+      return false;
+    }
+    auto calleeFunc = dyn_cast<CallBase>(i)->getCalledFunction();
+    if (!calleeFunc) {
+      return false;
+    }
+
+    auto fname = calleeFunc->getName();
+    unordered_set<string> printFuncs = { "printf", "puts", "putc", "putchar" };
+    for (auto printFunc : printFuncs) {
+      if (fname == printFunc || fname == (printFunc + "_unlocked")) {
+        return true;
+      }
+    }
+    return false;
+  };
+
   /*
    * Fetch the instructions
    */
   auto i0 = edge->getOutgoingT();
   auto i1 = edge->getIncomingT();
+
+  if (isCallToPrint(i0) && isa<LoadInst>(i1)) {
+    return true;
+  } else if (isa<LoadInst>(i0) && isCallToPrint(i1)) {
+    return true;
+  }
 
   return !mayAccessSameMemoryObject(i0, i1);
 }
