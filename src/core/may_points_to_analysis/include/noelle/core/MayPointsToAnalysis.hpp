@@ -41,7 +41,7 @@ public:
 
   bool mayBePointedByUnknown(Value *memobj);
   bool mayBePointedByReturnValue(Value *memobj);
-  std::unordered_set<Value *> getPointees(Value *ptr);
+  std::unordered_set<Value *> getPointeeMemobjs(Value *ptr);
 
   void doMayPointsToAnalysis(void);
   void doMayPointsToAnalysisFor(GlobalVariable *globalVar);
@@ -150,7 +150,7 @@ private:
   void handleFuncUsers(NodeID ptrId);
   void handleCopyEdges(NodeID srcId);
 
-  BitVector getPointees(NodeID nodeId);
+  BitVector getPointeeBitVector(NodeID nodeId);
   std::unordered_set<NodeID> getReachableMemobjs(NodeID ptrId);
   bool unionPts(NodeID srcId, NodeID dstId);
 };

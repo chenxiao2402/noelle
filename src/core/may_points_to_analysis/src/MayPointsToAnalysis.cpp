@@ -55,17 +55,24 @@ bool MayPointsToAnalysis::mayAlias(Value *ptr1, Value *ptr2) {
   } else if (func1 != nullptr && func2 == nullptr) {
     auto funcSum = getFunctionSummary(func1);
     funcSum->doMayPointsToAnalysis();
-    return funcSum->getPointees(stripped1).count(nullptr) > 0;
+    return funcSum->getPointeeMemobjs(stripped1).count(nullptr) > 0;
   } else if (func1 == nullptr && func2 != nullptr) {
     auto funcSum = getFunctionSummary(func2);
     funcSum->doMayPointsToAnalysis();
-    return funcSum->getPointees(stripped2).count(nullptr) > 0;
+    return funcSum->getPointeeMemobjs(stripped2).count(nullptr) > 0;
   } else if (func1 == func2) {
     auto funcSum = getFunctionSummary(func1);
     funcSum->doMayPointsToAnalysis();
-    auto ptes1 = funcSum->getPointees(stripped1);
-    auto ptes2 = funcSum->getPointees(stripped2);
-    return !intersect(ptes1, ptes2).empty();
+    auto ptes1 = funcSum->getPointeeMemobjs(stripped1);
+    auto ptes2 = funcSum->getPointeeMemobjs(stripped2);
+    for (auto pte1 : ptes1) {
+      for (auto pte2 : ptes2) {
+        if (pte1 == pte2) {
+          return true;
+        }
+      }
+    }
+    return false;
   } else {
     return true;
   }
@@ -84,6 +91,7 @@ bool MayPointsToAnalysis::notPrivatizable(GlobalVariable *globalVar,
                                           Function *currentF) {
   auto funcSum = getFunctionSummary(currentF);
   funcSum->doMayPointsToAnalysisFor(globalVar);
+
   auto result = funcSum->mayBePointedByUnknown(globalVar)
                 || funcSum->mayBePointedByReturnValue(globalVar);
   funcSum->clearPointsToSummary();
@@ -106,7 +114,7 @@ bool MayPointsToAnalysis::mayAccessEscapedMemobj(Instruction *inst) {
   }
 
   funcSum->doMayPointsToAnalysis();
-  auto pointees = funcSum->getPointees(ptr);
+  auto pointees = funcSum->getPointeeMemobjs(ptr);
   for (auto memobj : pointees) {
     if (memobj == nullptr || funcSum->mayBePointedByUnknown(memobj)) {
       return true;
@@ -121,7 +129,7 @@ std::unordered_set<Value *> MayPointsToAnalysis::getPointees(
     Function *currentF) {
   assert(ptr->getType()->isPointerTy());
   auto funcSum = getFunctionSummary(currentF);
-  return funcSum->getPointees(ptr);
+  return funcSum->getPointeeMemobjs(ptr);
 }
 
 MayPointsToAnalysis::~MayPointsToAnalysis() {

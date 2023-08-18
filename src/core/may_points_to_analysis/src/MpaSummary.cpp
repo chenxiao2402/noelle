@@ -30,10 +30,23 @@ MpaSummary::MpaSummary(Function *currentF) : currentF(currentF) {
 
   auto insertPointer = [&](Value *v) {
     if (v->getType()->isPointerTy()) {
-      pointers.insert(v);
-      auto stripped = strip(v);
-      if (stripped != v) {
-        pointers.insert(stripped);
+      queue<Value *> todolist;
+      todolist.push(v);
+
+      while (!todolist.empty()) {
+        auto ptr = todolist.front();
+        todolist.pop();
+        pointers.insert(ptr);
+
+        if (isa<GetElementPtrInst>(ptr)) {
+          auto gepInst = dyn_cast<GetElementPtrInst>(ptr);
+          todolist.push(gepInst->getPointerOperand());
+        } else if (isa<GEPOperator>(ptr)) {
+          auto gepOp = dyn_cast<GEPOperator>(ptr);
+          todolist.push(gepOp->getPointerOperand());
+        } else if (isa<BitCastInst>(ptr) || isa<BitCastOperator>(ptr)) {
+          todolist.push(ptr->stripPointerCasts());
+        }
       }
     }
   };
@@ -50,22 +63,22 @@ MpaSummary::MpaSummary(Function *currentF) : currentF(currentF) {
 
   for (auto &bb : *currentF) {
     for (auto &inst : bb) {
-      if (isa<LoadInst>(inst)) {
+      if (isa<LoadInst>(&inst)) {
         auto loadInst = dyn_cast<LoadInst>(&inst);
         insertPointer(loadInst->getPointerOperand());
         insertPointer(loadInst);
-      } else if (isa<StoreInst>(inst)) {
+      } else if (isa<StoreInst>(&inst)) {
         auto storeInst = dyn_cast<StoreInst>(&inst);
         storeInsts.insert(storeInst);
         insertPointer(storeInst->getValueOperand());
         insertPointer(storeInst->getPointerOperand());
-      } else if (isa<BitCastInst>(inst) || isa<GetElementPtrInst>(inst)) {
+      } else if (isa<BitCastInst>(&inst) || isa<GetElementPtrInst>(&inst)) {
         insertPointer(&inst);
-      } else if (isa<AllocaInst>(inst)) {
+      } else if (isa<AllocaInst>(&inst)) {
         auto allocaInst = dyn_cast<AllocaInst>(&inst);
         allocaInsts.insert(allocaInst);
         insertPointer(allocaInst);
-      } else if (isa<CallBase>(inst)) {
+      } else if (isa<CallBase>(&inst)) {
         auto callInst = dyn_cast<CallBase>(&inst);
         auto calleeType = getCalleeFunctionType(callInst);
         switch (calleeType) {
@@ -91,7 +104,18 @@ MpaSummary::MpaSummary(Function *currentF) : currentF(currentF) {
             }
             break;
         }
-      } else if (isa<ReturnInst>(inst)) {
+      } else if (isa<PHINode>(&inst) && inst.getType()->isPointerTy()) {
+        auto phiNode = dyn_cast<PHINode>(&inst);
+        insertPointer(phiNode);
+        for (auto &incoming : phiNode->incoming_values()) {
+          insertPointer(incoming);
+        }
+      } else if (isa<SelectInst>(&inst) && inst.getType()->isPointerTy()) {
+        auto selectInst = dyn_cast<SelectInst>(&inst);
+        insertPointer(selectInst);
+        insertPointer(selectInst->getTrueValue());
+        insertPointer(selectInst->getFalseValue());
+      } else if (isa<ReturnInst>(&inst)) {
         auto returnInst = dyn_cast<ReturnInst>(&inst);
         auto retVal = returnInst->getReturnValue();
         if (retVal && retVal->getType()->isPointerTy()) {
@@ -102,7 +126,7 @@ MpaSummary::MpaSummary(Function *currentF) : currentF(currentF) {
   }
 }
 
-unordered_set<Value *> MpaSummary::getPointees(Value *ptr) {
+unordered_set<Value *> MpaSummary::getPointeeMemobjs(Value *ptr) {
   assert(mpaFinished);
 
   auto stripped = strip(ptr);
@@ -111,7 +135,8 @@ unordered_set<Value *> MpaSummary::getPointees(Value *ptr) {
   auto ptrId = ptr2nodeId[stripped];
   unordered_set<Value *> pointees;
 
-  for (auto memobjId : getPointees(ptrId).set_bits()) {
+  auto pointeeBitVec = getPointeeBitVector(ptrId);
+  for (auto memobjId : pointeeBitVec.set_bits()) {
     if (memobjId == UnknownMemobjId) {
       pointees.insert(nullptr);
     } else {
@@ -148,7 +173,7 @@ bool MpaSummary::mayBePointedByReturnValue(Value *memobj) {
   return false;
 }
 
-BitVector MpaSummary::getPointees(NodeID nodeId) {
+BitVector MpaSummary::getPointeeBitVector(NodeID nodeId) {
   if (pointsTo.find(nodeId) != pointsTo.end()) {
     return pointsTo[nodeId];
   } else {
@@ -160,11 +185,13 @@ unordered_set<NodeID> MpaSummary::getReachableMemobjs(NodeID ptrId) {
   unordered_set<NodeID> reachable;
   queue<NodeID> todolist;
   todolist.push(ptrId);
+
   while (!todolist.empty()) {
     auto nodeId = todolist.front();
     todolist.pop();
 
-    for (auto memObj : getPointees(nodeId).set_bits()) {
+    auto pointeeBitVec = getPointeeBitVector(nodeId);
+    for (auto memObj : pointeeBitVec.set_bits()) {
       if (reachable.find(memObj) == reachable.end()) {
         reachable.insert(memObj);
         todolist.push(memObj);
@@ -205,6 +232,7 @@ unordered_set<Value *> MpaSummary::getAllocations(void) {
 
 NodeID MpaSummary::getPtrId(Value *v) {
   assert(v->getType()->isPointerTy());
+
   auto stripped = strip(v);
   if (ptr2nodeId.find(stripped) == ptr2nodeId.end()) {
     ptr2nodeId[stripped] = nextNodeId++;
@@ -225,11 +253,13 @@ void MpaSummary::doMayPointsToAnalysis(void) {
 }
 
 void MpaSummary::doMayPointsToAnalysisFor(GlobalVariable *globalVar) {
+  clearPointsToSummary();
   allocaCandidate = globalVar;
   doMayPointsToAnalysis();
 }
 
 void MpaSummary::clearPointsToSummary(void) {
+  allocaCandidate = nullptr;
   mpaFinished = false;
   nextNodeId = 1;
   ptr2nodeId.clear();
@@ -243,8 +273,6 @@ void MpaSummary::clearPointsToSummary(void) {
 }
 
 void MpaSummary::initPtInfo(void) {
-
-  clearPointsToSummary();
 
   auto allocations = getAllocations();
 
@@ -379,7 +407,7 @@ void MpaSummary::solveWorklist(void) {
 }
 
 void MpaSummary::handleLoadStore(NodeID ptrId) {
-  auto pointees = getPointees(ptrId);
+  auto pointees = getPointeeBitVector(ptrId);
   for (auto memobjId : pointees.set_bits()) {
     /*
      * OutgoingLoads help us add new copy edges.

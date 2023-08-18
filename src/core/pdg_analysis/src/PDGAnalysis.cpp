@@ -32,6 +32,7 @@ PDGAnalysis::PDGAnalysis()
     M{ nullptr },
     programDependenceGraph{ nullptr },
     dfa{},
+    mpa{},
     embedPDG{ false },
     dumpPDG{ false },
     performThePDGComparison{ false },

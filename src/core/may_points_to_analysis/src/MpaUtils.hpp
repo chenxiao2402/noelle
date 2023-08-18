@@ -46,9 +46,6 @@ Value *strip(Value *pointer);
 
 BitVector unite(const BitVector &lhs, const BitVector &rhs);
 
-std::unordered_set<Value *> intersect(const std::unordered_set<Value *> &lhs,
-                                      const std::unordered_set<Value *> &rhs);
-
 bool isAllocation(Value *allocation);
 
 } // namespace llvm::noelle
